@@ -49,8 +49,8 @@ def norm_logits(logits : torch.Tensor, temperature : float, top_k : float, top_p
 
 def sample(probs : torch.Tensor, num_samples: int = 1):
     idx_next = torch.multinomial(probs, num_samples=num_samples)
-    if (idx_next.item() == 0):
-        raise RuntimeError
+    #if (idx_next.item() == 0) and False:
+    #    raise RuntimeError
     return idx_next
 
 
@@ -59,5 +59,5 @@ def max_fn(x):
         norm(max (x, 0))
     """
     x_max = torch.where(x > 0, x, torch.zeros_like(x))
-    x_max_sum = torch.sum(x_max, dim=1, keepdim=True) 
+    x_max_sum = torch.sum(x_max, dim=1, keepdim=True)+1e-6
     return x_max / x_max_sum

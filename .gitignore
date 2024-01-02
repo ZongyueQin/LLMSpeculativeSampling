@@ -1,1 +1,4 @@
 *__pycache__*
+logs/
+*acc_rate.pkl
+*acc_rate.png
