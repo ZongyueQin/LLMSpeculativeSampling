@@ -1,5 +1,7 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
+os.environ['CURL_CA_BUNDLE'] = ''
+
 import torch
 import argparse
 import contexttimer
@@ -259,7 +261,7 @@ def evaluate(approx_model_name, target_model_name,
     repeats = 10
     
     if dataset == 'wmt':
-        dataset = load_dataset('wmt14', 'de-en', split='test[:500]')
+        dataset = load_dataset('wmt14', 'de-en', split='test')
         print(dataset[0])
         prefix = 'translate English to German: '
         input_dataset = [tokenizer.encode(prefix + s['translation']['en'], return_tensors="pt") for s in dataset]
@@ -297,7 +299,7 @@ def evaluate(approx_model_name, target_model_name,
         scores = []
         pred_seq = []
 
-        """
+        
         for input_ids in tqdm(ds):
             input_ids = input_ids.to(torch_device)
             t = process_time_ns()
@@ -543,7 +545,7 @@ def evaluate(approx_model_name, target_model_name,
   #              break
   #          break
 
-        """ 
+         
          
         # beam speculative decoding
         for gamma in [2,4,6,8]:
