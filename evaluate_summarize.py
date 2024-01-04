@@ -261,14 +261,12 @@ def evaluate(approx_model_name, target_model_name,
     repeats = 10
     
     if dataset == 'cnndm':
-        dataset = load_dataset('cnn_dailymail', '3.0.0', split='test')
-        print(dataset[0])
+        dataset = load_dataset('cnn_dailymail', '3.0.0', split='test[:10]')
         prefix = 'Summarize: '
         input_dataset = [tokenizer.encode(prefix + s['article'], return_tensors="pt", max_length=1024) for s in dataset]
         output_dataset = [[s['highlights']] for s in dataset]
     else:
         raise RuntimeError(f"Unrecognized dataset {dataset}")
-    xxx = input()
     # split dataset based on input length
     #length_interval = [100,200,400,800]
 
@@ -314,6 +312,8 @@ def evaluate(approx_model_name, target_model_name,
 
         print(f'\nsmall model (gpu) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob score = {np.mean(scores)}')
         print(f'\nsmall model (gpu) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob score = {np.mean(scores)}', file=log_f)
+        print(pred_seq[0])
+        print(output_dataset[0])
         rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset)
         print(f'rouge score = {rouge_score}')
         print(f'rouge score = {rouge_score}', file=log_f)
@@ -344,7 +344,9 @@ def evaluate(approx_model_name, target_model_name,
         rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset)
         print(f'rouge score = {rouge_score}')
         print(f'rouge score = {rouge_score}', file=log_f)
-        
+        print(pred_seq[0])
+        print(output_dataset[0])
+       
         # large model beam sample 
         total_time = 0
         total_token = 0
@@ -487,8 +489,8 @@ def evaluate(approx_model_name, target_model_name,
                 rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset)
                 print(f'rouge score = {rouge_score}')
                 print(f'rouge score = {rouge_score}', file=log_f)
-                break
-            break
+                #break
+            #break
 
         # true beam speculative decoding
         for gamma in [2,4,6,8]:
@@ -543,8 +545,8 @@ def evaluate(approx_model_name, target_model_name,
                 rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset)
                 print(f'rouge score = {rouge_score}')
                 print(f'rouge score = {rouge_score}', file=log_f)
-                break
-            break
+                #break
+            #break
 
          
          
@@ -602,8 +604,8 @@ def evaluate(approx_model_name, target_model_name,
                 rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset)
                 print(f'rouge score = {rouge_score}')
                 print(f'rouge score = {rouge_score}', file=log_f)
-                break
-            break
+                #break
+            #break
 
        
         # iid beam speculative decoding
@@ -663,8 +665,8 @@ def evaluate(approx_model_name, target_model_name,
                 rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset)
                 print(f'rouge score = {rouge_score}')
                 print(f'rouge score = {rouge_score}', file=log_f)
-                break
-            break
+                #break
+            #break
 
 
 

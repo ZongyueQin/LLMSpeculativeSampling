@@ -261,7 +261,7 @@ def evaluate(approx_model_name, target_model_name,
     repeats = 10
     
     if dataset == 'wmt':
-        dataset = load_dataset('wmt14', 'de-en', split='test')
+        dataset = load_dataset('wmt14', 'de-en', split='test[:200]')
         print(dataset[0])
         prefix = 'translate English to German: '
         input_dataset = [tokenizer.encode(prefix + s['translation']['en'], return_tensors="pt") for s in dataset]
