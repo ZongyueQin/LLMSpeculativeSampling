@@ -38,6 +38,7 @@ def parse_arguments():
     parser.add_argument('--acc_rate_head_path', type=str, default=None)
     parser.add_argument('--log_file', type=str, default="logs/log.txt")
     parser.add_argument('--dataset', type=str, default='cnndm')
+    parser.add_argument('--max_seconds', type=int, default=7200, help='timeout seconds')
     args = parser.parse_args()
     return args
 
@@ -190,6 +191,7 @@ def get_score(output, target_model, input_len):
 def evaluate(approx_model_name, target_model_name, 
         dataset, 
         acc_rate_head_path = None, num_tokens=20, 
+        max_seconds = 7200,
             #gamma = 4, width=1,
              random_seed = None, verbose = False, log_file = "logs/log.txt"):
     torch_device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -261,10 +263,13 @@ def evaluate(approx_model_name, target_model_name,
     repeats = 10
     
     if dataset == 'cnndm':
-        dataset = load_dataset('cnn_dailymail', '3.0.0', split='test[:10]')
+        dataset = load_dataset('cnn_dailymail', '3.0.0', split='test')
         prefix = 'Summarize: '
-        input_dataset = [tokenizer.encode(prefix + s['article'], return_tensors="pt", max_length=1024) for s in dataset]
+        input_dataset = [tokenizer.encode(prefix + s['article'], return_tensors="pt", max_length=512, truncation=True) for s in dataset]
         output_dataset = [[s['highlights']] for s in dataset]
+        BiLD_params = [(0.2, 2), (0.3, 3)]
+        multi_params = [(2,1,16), (2,1,32), (4,1,16), (4,1,32)]
+
     else:
         raise RuntimeError(f"Unrecognized dataset {dataset}")
     # split dataset based on input length
@@ -287,6 +292,42 @@ def evaluate(approx_model_name, target_model_name,
         print(f'input length {l}-{u}, {len(ds)} data in total')
         total_input_tokens = sum([d.size(1) for d in ds])
         print('total_input_tokens', total_input_tokens)
+
+        # large model github implementation
+        total_time = 0
+        total_token = 0
+        approx_time = 0
+        target_time = 0
+        other_time = 0
+        target_times = 0
+        scores = []
+        pred_seq = []
+        large_model_cnt = 0
+        for input_ids in tqdm(ds):
+            large_model_cnt += 1
+            input_ids = input_ids.to(torch_device)
+            t = process_time_ns()
+            output = autoregressive_sampling(input_ids, large_model, num_tokens, eos_token_id = tokenizer.eos_token_id, 
+                    top_k = top_k, top_p=top_p, pad_token_id = tokenizer.pad_token_id)
+            total_time += process_time_ns() - t
+            total_token += len(output[0]) - input_ids.size(1)
+            score = get_score(output, large_model, input_ids.size(1))
+            scores.append(score.item())
+            pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+            if total_time / 1e9 > max_seconds:
+                print(f'terminated at {large_model_cnt}', file=log_f)
+                print(f'terminated at {large_model_cnt}')
+                break
+
+
+        print(f'\nlarge model total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}', file=log_f)
+        print(f'\nlarge model total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}')
+        rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset[:large_model_cnt])
+        print(f'rouge score = {rouge_score}')
+        print(f'rouge score = {rouge_score}', file=log_f)
+        print(pred_seq[0])
+        print(output_dataset[0])
+
         # small model github implementation
          
         total_time = 0
@@ -298,8 +339,9 @@ def evaluate(approx_model_name, target_model_name,
         scores = []
         pred_seq = []
 
-        
+        cnt = 0 
         for input_ids in tqdm(ds):
+            cnt += 1
             input_ids = input_ids.to(torch_device)
             t = process_time_ns()
             output = autoregressive_sampling(input_ids, small_model, num_tokens, eos_token_id = tokenizer.eos_token_id, 
@@ -309,82 +351,24 @@ def evaluate(approx_model_name, target_model_name,
             score = get_score(output, large_model, input_ids.size(1))
             scores.append(score.item())
             pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+            if total_time / 1e9 > max_seconds:
+                print(f'terminated at {cnt}', file=log_f)
+                print(f'terminated at {cnt}')
+                break
+
+
 
         print(f'\nsmall model (gpu) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob score = {np.mean(scores)}')
         print(f'\nsmall model (gpu) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob score = {np.mean(scores)}', file=log_f)
-        print(pred_seq[0])
-        print(output_dataset[0])
-        rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset)
+        print(f'prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}')
+        print(f'prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}', file=log_f)
+
+        rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset[:cnt])
         print(f'rouge score = {rouge_score}')
         print(f'rouge score = {rouge_score}', file=log_f)
 
-        # large model github implementation
-        total_time = 0
-        total_token = 0
-        approx_time = 0
-        target_time = 0
-        other_time = 0
-        target_times = 0
-        scores = []
-        pred_seq = []
-        for input_ids in tqdm(ds):
-            input_ids = input_ids.to(torch_device)
-            t = process_time_ns()
-            output = autoregressive_sampling(input_ids, large_model, num_tokens, eos_token_id = tokenizer.eos_token_id, 
-                    top_k = top_k, top_p=top_p, pad_token_id = tokenizer.pad_token_id)
-            total_time += process_time_ns() - t
-            total_token += len(output[0]) - input_ids.size(1)
-            score = get_score(output, large_model, input_ids.size(1))
-            scores.append(score.item())
-            pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
-
-
-        print(f'\nlarge model total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}', file=log_f)
-        print(f'\nlarge model total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}')
-        rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset)
-        print(f'rouge score = {rouge_score}')
-        print(f'rouge score = {rouge_score}', file=log_f)
-        print(pred_seq[0])
-        print(output_dataset[0])
        
-        # large model beam sample 
-        total_time = 0
-        total_token = 0
-        approx_time = 0
-        target_time = 0
-        other_time = 0
-        target_times = 0
-        scores = []
-        pred_seq = []
-        for input_ids in tqdm(ds):
-            input_ids = input_ids.to(torch_device)
-            t = process_time_ns()
-            output = large_model.generate(input_ids, max_new_tokens = num_tokens, num_return_sequences=1, do_sample=True, top_k=top_k, top_p=top_p,
-                    num_beams = 4,
-                    pad_token_id=tokenizer.eos_token_id)
-            #autoregressive_sampling(input_ids, large_model, num_tokens, top_k = top_k, top_p=top_p)
-            total_time += process_time_ns() - t
-
-            if large_model.config.is_encoder_decoder == True:
-                output = torch.cat((input_ids, output), dim=-1)
-            total_token += len(output[0]) - input_ids.size(1)
-            score = get_score(output, large_model, input_ids.size(1))
-            if score.isnan().any():
-                print(input_ids.size())
-                print(output)
-                print(output.size())
-                print(score)
-                xxx = input()
-            scores.append(score.item())
-            pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
-
-
-        print(f'\nlarge model beam sample width {4} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}', file=log_f)
-        print(f'\nlarge model beam sample width {4} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}')
-        rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset)
-        print(f'rouge score = {rouge_score}')
-        print(f'rouge score = {rouge_score}', file=log_f)
-        
+         
         # convetional speculative decoding
         total_time = 0
         total_token = 0
@@ -398,7 +382,9 @@ def evaluate(approx_model_name, target_model_name,
         approx_times = 0
         scores = []
         pred_seq = []
+        cnt = 0
         for input_ids in tqdm(ds):
+            cnt += 1
             input_ids = input_ids.to(torch_device)
             t = process_time_ns()
             output, details = speculative_sampling(input_ids, small_model, large_model, 
@@ -418,25 +404,33 @@ def evaluate(approx_model_name, target_model_name,
             score = get_score(output, large_model, input_ids.size(1))
             scores.append(score.item())
             pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+            if total_time / 1e9 > max_seconds:
+                print(f'terminated at {cnt}', file=log_f)
+                print(f'terminated at {cnt}')
+                break
+
 
         print(f'\n google speculative decoding (with KVCache) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
         print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
         print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}", file=log_f)
-        print(f"prob score = {np.mean(scores)}", file=log_f)
+        print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}", file=log_f)
 
         print(f'\n google speculative decoding (with KVCache) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
         print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}")
         print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}")
-        print(f"prob score = {np.mean(scores)}")
+        print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")
 
-        rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset)
+        rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset[:cnt])
         print(f'rouge score = {rouge_score}')
         print(f'rouge score = {rouge_score}', file=log_f)
  
         
         # BiLD speculative decoding
-        for fallback_thres in [0.2, 0.3, 0.4,0.5,0.6,0.7,0.8,0.9]:
-            for rollback_thres in range(1,10):
+        #for fallback_thres in [0.2, 0.3, 0.4,0.5,0.6,0.7,0.8,0.9]:
+        #    for rollback_thres in range(1,10):
+        if True:
+            for fallback_thres, rollback_thres in BiLD_params:
+
                 total_time = 0
                 total_token = 0
                 approx_time = 0
@@ -449,8 +443,9 @@ def evaluate(approx_model_name, target_model_name,
                 approx_times = 0
                 scores = []
                 pred_seq = []
-
+                cnt = 0
                 for input_ids in tqdm(ds):
+                    cnt += 1
 
                     input_ids = input_ids.to(torch_device)
                     t = process_time_ns()
@@ -474,27 +469,35 @@ def evaluate(approx_model_name, target_model_name,
                     score = get_score(output, large_model, input_ids.size(1))
                     scores.append(score.item())
                     pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+                    if total_time / 1e9 > max_seconds:
+                        print(f'terminated at {cnt}', file=log_f)
+                        print(f'terminated at {cnt}')
+                        break
+
 
 
                 print(f'\n BiLD decoding {(fallback_thres, rollback_thres)} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}", file=log_f)
-                print(f"prob score = {np.mean(scores)}", file=log_f)       
+                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}", file=log_f)       
         
                 print(f'\n BiLD decoding {(fallback_thres, rollback_thres)} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}")
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}")
-                print(f"prob score = {np.mean(scores)}")  
+                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")  
 
-                rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset)
+                rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset[:cnt])
                 print(f'rouge score = {rouge_score}')
                 print(f'rouge score = {rouge_score}', file=log_f)
                 #break
             #break
-
+        
         # true beam speculative decoding
-        for gamma in [2,4,6,8]:
-            for width in [2,4,6,8]:
+        #for gamma in [2,4,6,8]:
+        #    width = 1
+        #    for num_beams in [2,4,8,16,32]:
+        if True:
+            for gamma, width, num_beams in multi_params: 
                 if gamma * width > 32:
                     break
                 total_time = 0
@@ -509,7 +512,9 @@ def evaluate(approx_model_name, target_model_name,
                 approx_times = 0
                 scores = []
                 pred_seq = []
+                cnt = 0
                 for input_ids in tqdm(ds):
+                    cnt += 1
 
                     input_ids = input_ids.to(torch_device)
                     t = process_time_ns()
@@ -517,7 +522,8 @@ def evaluate(approx_model_name, target_model_name,
                     output, details = beam_speculative_sampling(input_ids, small_model, large_model, 
                       eos_token_id = tokenizer.eos_token_id,
                       pad_token_id = tokenizer.pad_token_id, max_len = num_tokens, 
-                      gamma = gamma, width=width, top_k = top_k, top_p=top_p, 
+                      gamma = gamma, width=width, num_beams = num_beams,
+                      top_k = top_k, top_p=top_p, 
                       random_seed = random_seed, details=True)
 
                     total_time += process_time_ns() - t
@@ -532,17 +538,22 @@ def evaluate(approx_model_name, target_model_name,
                     score = get_score(output, large_model, input_ids.size(1))
                     scores.append(score.item())
                     pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+                    if total_time / 1e9 > max_seconds:
+                        print(f'terminated at {cnt}', file=log_f)
+                        print(f'terminated at {cnt}')
+                        break
+
 
                 print(f'\n true beam speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}", file=log_f)
-                print(f"prob score = {np.mean(scores)}", file=log_f)       
+                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}", file=log_f)       
         
                 print(f'\n true beam speculative decoding (with KVCache) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}")
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}")
-                print(f"prob score = {np.mean(scores)}")  
-                rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset)
+                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")  
+                rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset[:cnt])
                 print(f'rouge score = {rouge_score}')
                 print(f'rouge score = {rouge_score}', file=log_f)
                 #break
@@ -551,8 +562,11 @@ def evaluate(approx_model_name, target_model_name,
          
          
         # beam speculative decoding
-        for gamma in [2,4,6,8]:
-            for width in [2,4,6,8]:
+#        for gamma in [2,4,6,8]:
+#            width = 1
+            #for num_beams in [2,4,8,16,32]:
+        if True:
+            for gamma, width, num_beams in multi_params: 
                 if gamma * width > 32:
                     break
  
@@ -568,7 +582,9 @@ def evaluate(approx_model_name, target_model_name,
                 approx_times = 0
                 scores = []
                 pred_seq = []
+                cnt = 0
                 for input_ids in tqdm(ds):
+                    cnt += 1
 
                     input_ids = input_ids.to(torch_device)
                     t = process_time_ns()
@@ -576,7 +592,7 @@ def evaluate(approx_model_name, target_model_name,
                     output, details = multi_speculative_sampling(input_ids, small_model, large_model, 
                       eos_token_id = tokenizer.eos_token_id,
                       pad_token_id = tokenizer.pad_token_id, max_len = num_tokens, 
-                      gamma = gamma, width=width, top_k = top_k, top_p=top_p, 
+                      gamma = gamma, width=width, num_beams = num_beams, top_k = top_k, top_p=top_p, 
                       random_seed = random_seed, details=True)
 
                     total_time += process_time_ns() - t
@@ -591,17 +607,22 @@ def evaluate(approx_model_name, target_model_name,
                     score = get_score(output, large_model, input_ids.size(1))
                     scores.append(score.item())
                     pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+                    if total_time / 1e9 > max_seconds:
+                        print(f'terminated at {cnt}', file=log_f)
+                        print(f'terminated at {cnt}')
+                        break
+
 
                 print(f'\n beam speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}", file=log_f)
-                print(f"prob score = {np.mean(scores)}", file=log_f)       
+                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}", file=log_f)       
         
                 print(f'\n beam speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}")
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}")
-                print(f"prob score = {np.mean(scores)}")  
-                rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset)
+                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")  
+                rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset[:cnt])
                 print(f'rouge score = {rouge_score}')
                 print(f'rouge score = {rouge_score}', file=log_f)
                 #break
@@ -609,8 +630,10 @@ def evaluate(approx_model_name, target_model_name,
 
        
         # iid beam speculative decoding
-        for gamma in [2,4,6,8]:
-            for width in [2,4,6,8]:
+ #       for gamma in [2,4,6,8]:
+ #           for width in [2, 4]:
+        if True:
+            for gamma, width, num_beams in multi_params: 
                 if gamma * width > 32:
                     break
  
@@ -626,7 +649,9 @@ def evaluate(approx_model_name, target_model_name,
                 approx_times = 0
                 scores = []
                 pred_seq = []
+                cnt = 0
                 for input_ids in tqdm(ds):
+                    cnt += 1
 
                     input_ids = input_ids.to(torch_device)
                     t = process_time_ns()
@@ -651,18 +676,23 @@ def evaluate(approx_model_name, target_model_name,
                     score = get_score(output, large_model, input_ids.size(1))
                     scores.append(score.item())
                     pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+                    if total_time / 1e9 > max_seconds:
+                        print(f'terminated at {cnt}', file=log_f)
+                        print(f'terminated at {cnt}')
+                        break
+
 
 
                 print(f'\niid speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}", file=log_f)
-                print(f"prob score = {np.mean(scores)}", file=log_f)
+                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}", file=log_f)
 
                 print(f'\niid speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}")
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}")
-                print(f"prob score = {np.mean(scores)}")
-                rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset)
+                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")
+                rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset[:cnt])
                 print(f'rouge score = {rouge_score}')
                 print(f'rouge score = {rouge_score}', file=log_f)
                 #break
@@ -677,6 +707,7 @@ if __name__ == "__main__":
     evaluate(args.approx_model_name, args.target_model_name, 
             dataset = args.dataset,
             num_tokens=args.max_tokens, 
+            max_seconds = args.max_seconds,
             #gamma=args.gamma, width=args.width,
              acc_rate_head_path = args.acc_rate_head_path,
              log_file = args.log_file,

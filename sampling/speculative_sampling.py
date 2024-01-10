@@ -12,10 +12,11 @@ import os
 
 @torch.no_grad()
 def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, target_model : torch.nn.Module, 
-                         eos_token_id, pad_token_id, max_len : int , gamma : int = 4, width : int = 8,
+                         eos_token_id, pad_token_id, max_len : int , gamma : int = 4, width : int = 8, num_beams: int = 8,
                          temperature : float = 1, top_k : int = 0, top_p : float = 0, verbose : bool = False, random_seed : int = None,
                          details : bool = False) -> torch.Tensor:
     seq_len = prefix.shape[1]
+    ori_eos_cnt = (prefix == eos_token_id).int().sum()
     T = seq_len + max_len
     acc_len = []
     acc_rate = []
@@ -53,13 +54,14 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
 
             # generate x of size width * (prefix_len+gamma)
             tt = process_time_ns()
+            #num_beams = max(4, width)
             if approx_model.config.is_encoder_decoder:
                 encoder_outputs.last_hidden_state = encoder_outputs.last_hidden_state[0:1]
 
                 out = approx_model_cache.beam_sample_with_kv_cache(
                        output_prefix, 
                        gamma=gamma, 
-                       num_beams=width, 
+                       num_beams=num_beams, 
                        top_k=top_k, top_p=top_p,
                        num_return_sequences=width,
                        return_dict_in_generate = True,
@@ -71,7 +73,7 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                 out = approx_model_cache.beam_sample_with_kv_cache(
                        output_prefix, 
                        gamma=gamma, 
-                       num_beams=width, 
+                       num_beams=num_beams, 
                        top_k=top_k, top_p=top_p,
                        num_return_sequences=width,
                        return_dict_in_generate = True,
@@ -178,11 +180,16 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
             output_prefix = torch.cat((output_prefix, t), dim=1)
             #pbar.update(n - pbar.n)
             mask = (output_prefix == eos_token_id)
-            if mask.any():
+            if mask.int().sum() > ori_eos_cnt:
                 mask = torch.cumsum(mask.float(), dim=1)
-                mask = (mask == 0)
+                mask = (mask < ori_eos_cnt+1)
+                end = mask.int().sum()
+                if end < mask.size(1):
+                    mask[:, end] = True
                 output_prefix = output_prefix[mask][None,:] 
                 break
+
+
 
 
             sample_time += process_time_ns() - tt
@@ -214,11 +221,12 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
 @torch.no_grad()
 def multi_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, target_model : torch.nn.Module, 
                          eos_token_id, pad_token_id, max_len : int ,
-                         gamma : int = 4, width : int = 8, strategy : str = "beam", 
+                         gamma : int = 4, width : int = 8, num_beams = None, strategy : str = "beam", 
                          acc_rate_head = None, acc_rate_thres = 0.4, 
                          temperature : float = 1, top_k : int = 0, top_p : float = 0, verbose : bool = False, random_seed : int = None,
                          details : bool = False) -> torch.Tensor:
     seq_len = prefix.shape[1]
+    ori_eos_cnt = (prefix == eos_token_id).int().sum()
     T = seq_len + max_len
     acc_len = []
     acc_rate = []
@@ -286,13 +294,16 @@ def multi_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mo
                 #        top_p = top_p,
                 #        do_sample=True,
                 #        max_new_tokens = gamma)
+                if num_beams is None:
+                    num_beams = max(4, width)
+
                 if approx_model.config.is_encoder_decoder:
                     encoder_outputs.last_hidden_state = encoder_outputs.last_hidden_state[0:1]
 
                     out = approx_model_cache.beam_sample_with_kv_cache(
                        output_prefix, 
                        gamma=gamma, 
-                       num_beams=width, 
+                       num_beams=num_beams, 
                        top_k=top_k, top_p=top_p,
                        num_return_sequences=width,
                        return_dict_in_generate = True,
@@ -303,7 +314,7 @@ def multi_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mo
                     out = approx_model_cache.beam_sample_with_kv_cache(
                        output_prefix, 
                        gamma=gamma, 
-                       num_beams=width, 
+                       num_beams=num_beams, 
                        top_k=top_k, top_p=top_p,
                        num_return_sequences=width,
                        return_dict_in_generate = True,
@@ -508,11 +519,16 @@ def multi_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mo
             sample_time += process_time_ns() - tt
 
             mask = (output_prefix == eos_token_id)
-            if mask.any():
+            if mask.int().sum() > ori_eos_cnt:
                 mask = torch.cumsum(mask.float(), dim=1)
-                mask = (mask == 0)
+                mask = (mask < ori_eos_cnt+1)
+                end = mask.int().sum()
+                if end < mask.size(1):
+                    mask[:, end] = True
                 output_prefix = output_prefix[mask][None,:] 
                 break
+
+
 
 
     
@@ -547,6 +563,7 @@ def BiLD_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, target_
                          temperature : float = 1, top_k : int = 0, top_p : float = 0, verbose : bool = False, random_seed : int = None,
                          details : bool = False) -> torch.Tensor:
     seq_len = prefix.shape[1]
+    ori_eos_cnt = (prefix == eos_token_id).int().sum()
     T = seq_len + max_len
     
     assert prefix.shape[0] == 1, "input batch size must be 1"
@@ -648,11 +665,16 @@ def BiLD_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, target_
             out = prefix
 
         mask = (out == eos_token_id)
-        if mask.any():
+        if mask.int().sum() > ori_eos_cnt:
             mask = torch.cumsum(mask.float(), dim=1)
-            mask = (mask == 0)
+            mask = (mask < ori_eos_cnt+1)
+            end = mask.int().sum()
+            if end < mask.size(1):
+                mask[:, end] = True
             out = out[mask][None,:] 
             break
+
+
 
         sample_time += process_time_ns() - tt
 
@@ -709,6 +731,7 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
     Returns:
         torch.Tensor: generated tokens (batch, target_seqlen)
     """
+    ori_eos_cnt = (prefix == eos_token_id).int().sum()
     seq_len = prefix.shape[1]
     T = seq_len + max_len
     
@@ -829,9 +852,12 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
             out = decoder_input_ids
 
         mask = (out == eos_token_id)
-        if mask.any():
+        if mask.int().sum() > ori_eos_cnt:
             mask = torch.cumsum(mask.float(), dim=1)
-            mask = (mask == 0)
+            mask = (mask < ori_eos_cnt+1)
+            end = mask.int().sum()
+            if end < mask.size(1):
+                mask[:, end] = True
             out = out[mask][None,:] 
             break
 
