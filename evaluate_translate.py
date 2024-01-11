@@ -17,10 +17,10 @@ import json
 from time import process_time_ns
 from tqdm import tqdm
 import evaluate as hf_evaluate
-
+import time
 import numpy as np
 import random
-
+import subprocess
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='args for main.py')
@@ -46,121 +46,6 @@ def parse_arguments():
 def color_print(text):
     print(Fore.RED + text + Style.RESET_ALL)
     
-def benchmark(fn, print_prefix, use_profiler=True, *args, **kwargs):
-    TEST_TIME = 10
-    profile_filename = f"./profile_logs/{print_prefix}"
-    
-    with contexttimer.Timer() as t:
-        if use_profiler:
-            with torch.profiler.profile(
-                activities=[torch.profiler.ProfilerActivity.CUDA],
-                schedule=torch.profiler.schedule(wait=0, warmup=1, active=2, repeat=1, skip_first=0),
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(profile_filename),
-                record_shapes=False,
-                profile_memory=False,
-                # with_stack=True
-            ) as prof:
-                for _ in range(TEST_TIME): 
-                    output = fn(*args, **kwargs)
-                    prof.step()
-        else:
-            for _ in range(TEST_TIME): 
-                output = fn(*args, **kwargs)
-
-    print(f"\n [benchmark] {print_prefix}, tokens/sec: {len(output[0]) / (t.elapsed / TEST_TIME)}, {t.elapsed / TEST_TIME} sec generates {len(output[0])} tokens")
-
-def my_benchmark(print_prefix, model, input_ids, max_length, top_k, top_p, pad_token_id):
-    TEST_TIME = 10
-    with contexttimer.Timer() as t:
-        for _ in range(TEST_TIME):
-            set_seed(42)
-            output = model.generate(input_ids, max_length=max_length, num_return_sequences=1, do_sample=False, top_k=top_k, top_p=top_p,
-                    pad_token_id=pad_token_id)
-    print(f"\n [benchmark] {print_prefix}, tokens/sec: {len(output[0]) / t.elapsed / TEST_TIME}, {t.elapsed / TEST_TIME} sec generates {len(output[0])} tokens")
-
-
-def generate(input_text, approx_model_name, target_model_name, num_tokens=20, gamma = 4,
-             random_seed = None, verbose = False, use_benchmark = False, use_profiling = False):
-    # NOTE() approx_model_name and target_model_name should use the same tokenizer!
-    
-    torch_device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
-    tokenizer = AutoTokenizer.from_pretrained(approx_model_name, trust_remote_code=True)
-  
-    Decoder().set_tokenizer(tokenizer)
-    
-    print(f"begin loading models: \n {approx_model_name} \n {target_model_name}")
-    if 't5' in approx_model_name:
-        small_model = AutoModelForSeq2SeqLM.from_pretrained(approx_model_name, 
-                                                       torch_dtype=torch.float16,
-                                                       device_map="auto",
-                                                       trust_remote_code=True)
-
-    else:
-        small_model = AutoModelForCausalLM.from_pretrained(approx_model_name, 
-                                                       torch_dtype=torch.float16,
-                                                       device_map="auto",
-                                                       trust_remote_code=True)
-
-    if 't5' in target_model_name:
-        large_model = AutoModelForSeq2SeqLM.from_pretrained(target_model_name, 
-                                                       torch_dtype=torch.float16,
-                                                       device_map="auto",
-                                                       trust_remote_code=True)
-
-    else:
-        large_model = AutoModelForCausalLM.from_pretrained(target_model_name, 
-                                                       torch_dtype=torch.float16,
-                                                       device_map="auto",
-                                                       trust_remote_code=True)
-
-    input_ids = tokenizer.encode(input_text, return_tensors='pt').to(torch_device)
-
-    top_k = 20
-    top_p = 0.9
-    repeats = 10
-
- 
-    print("BEAM")
-    total_time = 0
-    ave_time = 0
-    for _ in range(repeats):
-        torch.manual_seed(123)
-        t = process_time_ns()
-        output = multi_speculative_sampling(input_ids, small_model, large_model, num_tokens, top_k = top_k, top_p=top_p, random_seed = random_seed)
-        total_time += (process_time_ns()-t)/1e9
-        ave_time += (process_time_ns()-t)/1e9/len(output[0])
-
-    print('BEAM model time', total_time/repeats, ave_time/repeats)
-
-
-
-    print("DIVERSE")
-    total_time = 0
-    ave_time = 0
-    for _ in range(repeats):
-        torch.manual_seed(123)
-        t = process_time_ns()
-        output = multi_speculative_sampling(input_ids, small_model, large_model, num_tokens, top_k = top_k, top_p=top_p, random_seed = random_seed, strategy="diverse")
-        total_time += (process_time_ns()-t)/1e9
-        ave_time += (process_time_ns()-t)/1e9/len(output[0])
-
-    print('DIVERSE model time', total_time/repeats, ave_time/repeats)
-
-
-
-
-    print("conventional")
-    total_time = 0
-    ave_time = 0
-    for _ in range(repeats):
-        torch.manual_seed(123)
-        t = process_time_ns()
-        output = speculative_sampling(input_ids, small_model, large_model, num_tokens, top_k = top_k, top_p=top_p, random_seed = random_seed)
-        total_time += (process_time_ns()-t)/1e9
-        ave_time += (process_time_ns()-t)/1e9/len(output[0])
-
-    print('conventional model time', total_time/repeats, ave_time/repeats)
 
 def get_score(output, target_model, input_len):
     with torch.no_grad():
@@ -186,6 +71,15 @@ def get_score(output, target_model, input_len):
                                   dim = -1,
                                   index = output[:, input_len+1:, None])
             return torch.mean(logits)
+
+def get_total_power(outputs, t1, t2):
+    x = [out.strip().split() for out in outputs]
+    x = [[float(xx[0]), float(xx[1])] for xx in x]
+    total_power = 0
+    for timestamp, power in x:
+        if timestamp > t1 and timestamp < t2:
+            total_power += power
+    return total_power
 
 
 def evaluate(approx_model_name, target_model_name, 
@@ -314,6 +208,8 @@ def evaluate(approx_model_name, target_model_name,
         scores = []
         pred_seq = []
         large_model_cnt = 0
+        P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
+        t1 = time.time()
         for input_ids in tqdm(ds):
             large_model_cnt += 1
 
@@ -330,6 +226,11 @@ def evaluate(approx_model_name, target_model_name,
                 print(f'terminated at {large_model_cnt}', file=log_f)
                 print(f'terminated at {large_model_cnt}')
                 break
+        t2 = time.time()
+        P.kill()
+        P.wait()
+        outputs = P.stdout.readlines()
+        power_total = get_total_power(outputs, t1, t2)
 
 
         print(f'\nlarge model total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}', file=log_f)
@@ -337,6 +238,11 @@ def evaluate(approx_model_name, target_model_name,
         bleu_score = bleu.compute(predictions = pred_seq, references = output_dataset[:large_model_cnt])
         print(f'bleu score = {bleu_score}')
         print(f'bleu score = {bleu_score}', file=log_f)
+        print(f'total power consumption: {power_total}')
+        print(f'total power consumption: {power_total}', file=log_f)
+        print(f'power/token: {power_total/total_token}')
+        print(f'power/token: {power_total/total_token}', file=log_f)
+
 
         # small model github implementation
         total_time = 0
@@ -348,7 +254,9 @@ def evaluate(approx_model_name, target_model_name,
         scores = []
         pred_seq = []
         cnt = 0
-         
+        P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
+        t1 = time.time()
+        
         for input_ids in tqdm(ds):
             cnt += 1
             input_ids = input_ids.to(torch_device)
@@ -365,12 +273,23 @@ def evaluate(approx_model_name, target_model_name,
                 print(f'terminated at {cnt}')
                 break
 
+        t2 = time.time()
+        P.kill()
+        P.wait()
+        outputs = P.stdout.readlines()
+        power_total = get_total_power(outputs, t1, t2)
+
 
         print(f'\nsmall model (gpu) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}')
         print(f'\nsmall model (gpu) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}', file=log_f)
         bleu_score = bleu.compute(predictions = pred_seq, references = output_dataset[:cnt])
         print(f'bleu score = {bleu_score}')
         print(f'bleu score = {bleu_score}', file=log_f)
+        print(f'total power consumption: {power_total}')
+        print(f'total power consumption: {power_total}', file=log_f)
+        print(f'power/token: {power_total/total_token}')
+        print(f'power/token: {power_total/total_token}', file=log_f)
+
 
         """ 
         # large model beam sample 
@@ -425,6 +344,9 @@ def evaluate(approx_model_name, target_model_name,
         scores = []
         pred_seq = []
         cnt = 0
+        P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
+        t1 = time.time()
+
         #print(tokenizer.eos_token_id)
         #print(tokenizer.pad_token_id)
         for input_ids in tqdm(ds):
@@ -458,6 +380,11 @@ def evaluate(approx_model_name, target_model_name,
                 print(f'terminated at {cnt}')
                 break
 
+        t2 = time.time()
+        P.kill()
+        P.wait()
+        outputs = P.stdout.readlines()
+        power_total = get_total_power(outputs, t1, t2)
 
         print(f'\n google speculative decoding (with KVCache) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
         print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
@@ -472,7 +399,12 @@ def evaluate(approx_model_name, target_model_name,
         bleu_score = bleu.compute(predictions = pred_seq, references = output_dataset[:cnt])
         print(f'bleu score = {bleu_score}')
         print(f'bleu score = {bleu_score}', file=log_f)
- 
+        print(f'total power consumption: {power_total}')
+        print(f'total power consumption: {power_total}', file=log_f)
+        print(f'power/token: {power_total/total_token}')
+        print(f'power/token: {power_total/total_token}', file=log_f)
+
+
         
         # BiLD speculative decoding
         #for fallback_thres in [0.2, 0.3, 0.4,0.5,0.6,0.7,0.8,0.9]:
@@ -492,6 +424,8 @@ def evaluate(approx_model_name, target_model_name,
                 scores = []
                 pred_seq = []
                 cnt = 0
+                P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
+                t1 = time.time()
 
                 for input_ids in tqdm(ds):
                     cnt += 1
@@ -524,6 +458,11 @@ def evaluate(approx_model_name, target_model_name,
                         print(f'terminated at {cnt}')
                         break
 
+                t2 = time.time()
+                P.kill()
+                P.wait()
+                outputs = P.stdout.readlines()
+                power_total = get_total_power(outputs, t1, t2)
 
                 print(f'\n BiLD decoding {(fallback_thres, rollback_thres)} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
@@ -538,6 +477,12 @@ def evaluate(approx_model_name, target_model_name,
                 bleu_score = bleu.compute(predictions = pred_seq, references = output_dataset[:cnt])
                 print(f'bleu score = {bleu_score}')
                 print(f'bleu score = {bleu_score}', file=log_f)
+                print(f'total power consumption: {power_total}')
+                print(f'total power consumption: {power_total}', file=log_f)
+                print(f'power/token: {power_total/total_token}')
+                print(f'power/token: {power_total/total_token}', file=log_f)
+
+
                 #break
            # break
 
@@ -562,6 +507,10 @@ def evaluate(approx_model_name, target_model_name,
                 scores = []
                 pred_seq = []
                 cnt = 0
+                P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
+                t1 = time.time()
+
+
                 for input_ids in tqdm(ds):
                     cnt += 1
 
@@ -592,6 +541,12 @@ def evaluate(approx_model_name, target_model_name,
                         print(f'terminated at {cnt}')
                         break
 
+                t2 = time.time()
+                P.kill()
+                P.wait()
+                outputs = P.stdout.readlines()
+                power_total = get_total_power(outputs, t1, t2)
+
 
                 print(f'\n true beam speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
@@ -607,6 +562,11 @@ def evaluate(approx_model_name, target_model_name,
                 print(f'bleu score = {bleu_score}', file=log_f)
             #    break
             #break
+                print(f'total power consumption: {power_total}')
+                print(f'total power consumption: {power_total}', file=log_f)
+                print(f'power/token: {power_total/total_token}')
+                print(f'power/token: {power_total/total_token}', file=log_f)
+
 
          
          
@@ -632,6 +592,10 @@ def evaluate(approx_model_name, target_model_name,
                 scores = []
                 pred_seq = []
                 cnt = 0
+                P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
+                t1 = time.time()
+
+
                 for input_ids in tqdm(ds):
                     cnt += 1
 
@@ -662,6 +626,12 @@ def evaluate(approx_model_name, target_model_name,
                         print(f'terminated at {cnt}')
                         break
 
+                t2 = time.time()
+                P.kill()
+                P.wait()
+                outputs = P.stdout.readlines()
+                power_total = get_total_power(outputs, t1, t2)
+
 
                 print(f'\n beam speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
@@ -677,6 +647,11 @@ def evaluate(approx_model_name, target_model_name,
                 print(f'bleu score = {bleu_score}', file=log_f)
              #   break
             #break
+                print(f'total power consumption: {power_total}')
+                print(f'total power consumption: {power_total}', file=log_f)
+                print(f'power/token: {power_total/total_token}')
+                print(f'power/token: {power_total/total_token}', file=log_f)
+
 
        
         # iid beam speculative decoding
@@ -701,6 +676,10 @@ def evaluate(approx_model_name, target_model_name,
                 scores = []
                 pred_seq = []
                 cnt = 0
+                P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
+                t1 = time.time()
+
+
                 for input_ids in tqdm(ds):
                     cnt += 1
 
@@ -733,6 +712,12 @@ def evaluate(approx_model_name, target_model_name,
                         print(f'terminated at {cnt}')
                         break
 
+                t2 = time.time()
+                P.kill()
+                P.wait()
+                outputs = P.stdout.readlines()
+                power_total = get_total_power(outputs, t1, t2)
+
 
                 print(f'\niid speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
@@ -748,6 +733,11 @@ def evaluate(approx_model_name, target_model_name,
                 print(f'bleu score = {bleu_score}', file=log_f)
              #   break
             #break
+
+                print(f'total power consumption: {power_total}')
+                print(f'total power consumption: {power_total}', file=log_f)
+                print(f'power/token: {power_total/total_token}')
+                print(f'power/token: {power_total/total_token}', file=log_f)
 
 
 
