@@ -21,6 +21,7 @@ import time
 import numpy as np
 import random
 import subprocess
+import pickle
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='args for main.py')
@@ -72,9 +73,16 @@ def get_score(output, target_model, input_len):
                                   index = output[:, input_len+1:, None])
             return torch.mean(logits)
 
-def get_total_power(outputs, t1, t2):
+def get_total_power(outputs, t1, t2, fname):
+    with open(fname, 'wb') as f:
+        pickle.dump((outputs, t1, t2), f)
     x = [out.strip().split() for out in outputs]
-    x = [[float(xx[0]), float(xx[1])] for xx in x]
+#    for xx in x:
+#        if len(xx) < 2:
+#            print(outputs)
+#            print(x)
+#            print(xx)
+    x = [[float(xx[0]), float(xx[1])] for xx in x if len(xx) >= 2] # it seems possible that the last output of nvidia-smi is missing
     total_power = 0
     for timestamp, power in x:
         if timestamp > t1 and timestamp < t2:
@@ -83,7 +91,7 @@ def get_total_power(outputs, t1, t2):
 
 
 def evaluate(approx_model_name, target_model_name, 
-        dataset, 
+        dataset_name, 
         acc_rate_head_path = None, num_tokens=20, 
         max_seconds = 7200,
             #gamma = 4, width=1,
@@ -156,27 +164,30 @@ def evaluate(approx_model_name, target_model_name,
     top_p = 0.9
     repeats = 10
     
-    if dataset == 'wmt':
+    if dataset_name == 'wmt':
         dataset = load_dataset('wmt14', 'de-en', split='test')
         print(dataset[0])
         if 't5' in approx_model_name:
             prefix = 'translate English to German: '
             postfix = ''
+            BiLD_params = [(0.2,2), (0.3,1)]
+            multi_params = [(4,2), (6,2)]
         elif 'opt' in approx_model_name:
             #prefix = 'English: ' 
             #postfix = '\nGerman: '
             prefix = 'Please translate the input into German. \nInput:'
             postfix = '\nGerman Translation: '
+            BiLD_params = [(0.2, 2), (0.3, 2), (0.3, 3)]
+            multi_params = [(4,4), (6,4), (4,6)]
+
         else:
             prefix = 'translate English to German: '
             postfix = ''
         input_dataset = [tokenizer.encode(prefix + s['translation']['en'] + postfix, return_tensors="pt") for s in dataset]
 
         output_dataset = [[s['translation']['de']] for s in dataset]
-        BiLD_params = [(0.2, 2), (0.3, 2), (0.3, 3)]
-        multi_params = [(4,4), (6,4), (4,6)]
     else:
-        raise RuntimeError(f"Unrecognized dataset {dataset}")
+        raise RuntimeError(f"Unrecognized dataset {dataset_name}")
     # split dataset based on input length
     #length_interval = [100,200,400,800]
 
@@ -186,6 +197,9 @@ def evaluate(approx_model_name, target_model_name,
     length_interval = [100000]
 
     bleu = hf_evaluate.load('bleu') 
+    prefix = "/llmss/LLMSpeculativeSampling/logs/"
+    approx_model_name = os.path.basename(approx_model_name)
+    target_model_name = os.path.basename(target_model_name)
 
     for i in range(len(length_interval)):
         u = length_interval[i]
@@ -230,7 +244,8 @@ def evaluate(approx_model_name, target_model_name,
         P.kill()
         P.wait()
         outputs = P.stdout.readlines()
-        power_total = get_total_power(outputs, t1, t2)
+        fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_large_model.pkl")
+        power_total = get_total_power(outputs, t1, t2, fname)
 
 
         print(f'\nlarge model total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}', file=log_f)
@@ -277,7 +292,8 @@ def evaluate(approx_model_name, target_model_name,
         P.kill()
         P.wait()
         outputs = P.stdout.readlines()
-        power_total = get_total_power(outputs, t1, t2)
+        fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_small_model.pkl")
+        power_total = get_total_power(outputs, t1, t2, fname)
 
 
         print(f'\nsmall model (gpu) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}')
@@ -384,7 +400,8 @@ def evaluate(approx_model_name, target_model_name,
         P.kill()
         P.wait()
         outputs = P.stdout.readlines()
-        power_total = get_total_power(outputs, t1, t2)
+        fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_ss.pkl")
+        power_total = get_total_power(outputs, t1, t2, fname)
 
         print(f'\n google speculative decoding (with KVCache) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
         print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
@@ -462,7 +479,9 @@ def evaluate(approx_model_name, target_model_name,
                 P.kill()
                 P.wait()
                 outputs = P.stdout.readlines()
-                power_total = get_total_power(outputs, t1, t2)
+                fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_BiLD_{fallback_thres}_{rollback_thres}.pkl")
+
+                power_total = get_total_power(outputs, t1, t2, fname)
 
                 print(f'\n BiLD decoding {(fallback_thres, rollback_thres)} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
@@ -545,7 +564,8 @@ def evaluate(approx_model_name, target_model_name,
                 P.kill()
                 P.wait()
                 outputs = P.stdout.readlines()
-                power_total = get_total_power(outputs, t1, t2)
+                fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_true_beam_{gamma}_{width}.pkl")
+                power_total = get_total_power(outputs, t1, t2, fname)
 
 
                 print(f'\n true beam speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
@@ -630,7 +650,8 @@ def evaluate(approx_model_name, target_model_name,
                 P.kill()
                 P.wait()
                 outputs = P.stdout.readlines()
-                power_total = get_total_power(outputs, t1, t2)
+                fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_beam_{gamma}_{width}.pkl")
+                power_total = get_total_power(outputs, t1, t2, fname)
 
 
                 print(f'\n beam speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
@@ -716,7 +737,8 @@ def evaluate(approx_model_name, target_model_name,
                 P.kill()
                 P.wait()
                 outputs = P.stdout.readlines()
-                power_total = get_total_power(outputs, t1, t2)
+                fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_iid_{gamma}_{width}.pkl")
+                power_total = get_total_power(outputs, t1, t2, fname)
 
 
                 print(f'\niid speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
@@ -746,7 +768,7 @@ def evaluate(approx_model_name, target_model_name,
 if __name__ == "__main__":
     args = parse_arguments()
     evaluate(args.approx_model_name, args.target_model_name, 
-            dataset = args.dataset,
+            dataset_name = args.dataset,
             num_tokens=args.max_tokens, 
             max_seconds = args.max_seconds,
             #gamma=args.gamma, width=args.width,
