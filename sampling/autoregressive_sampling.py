@@ -10,6 +10,9 @@ def autoregressive_sampling(x : torch.Tensor, model : torch.nn.Module, N : int, 
     T = len(x) + N
 
     past_key_values = None
+    if pad_token_id is None:
+        pad_token_id = eos_token_id
+
     decoder_x = torch.LongTensor([[pad_token_id]]).to(x.device)
     while n < T:
         # outputs = model(x)

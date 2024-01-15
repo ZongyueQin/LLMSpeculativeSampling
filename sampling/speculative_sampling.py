@@ -15,6 +15,9 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                          eos_token_id, pad_token_id, max_len : int , gamma : int = 4, width : int = 8, num_beams: int = 8,
                          temperature : float = 1, top_k : int = 0, top_p : float = 0, verbose : bool = False, random_seed : int = None,
                          details : bool = False) -> torch.Tensor:
+    if pad_token_id is None:
+        pad_token_id = eos_token_id
+
     seq_len = prefix.shape[1]
     ori_eos_cnt = (prefix == eos_token_id).int().sum()
     T = seq_len + max_len
@@ -590,6 +593,8 @@ def BiLD_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, target_
     acc_rate = []
     acc_len = []
 
+    if pad_token_id is None:
+        pad_token_id = eos_token_id
     decoder_input_ids = torch.LongTensor([[pad_token_id]]).to(prefix.device)
 
     if approx_model.config.is_encoder_decoder == False:
@@ -759,6 +764,8 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
     acc_rate = []
     acc_len = []
 
+    if pad_token_id is None:
+        pad_token_id = eos_token_id
     decoder_input_ids = torch.LongTensor([[pad_token_id]]).to(prefix.device)
 
     while prefix.shape[1] + decoder_input_ids.shape[1] - 1 < T:
