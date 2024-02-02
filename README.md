@@ -1,4 +1,4 @@
-# Fast inference from transformers via speculative decoding
+# Fast inference from transformers via speculative decoding (This README is from original repo, not for our code)
 
 This repository implements speculative sampling for large language model (LLM) decoding. It utilizes two models during the decoding process: a target model and an approximation model. The approximation model is a smaller model, while the target model is a larger one. The approximation model generates token guesses, and the target model corrects these guesses. This approach allows for decoding by running the target model in parallel on the outputs of the approximation models, resulting in improved efficiency compared to decoding with the target model alone.
 
