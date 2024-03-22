@@ -50,7 +50,8 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
 
 
 #    with tqdm(total=T, desc="speculative sampling") as pbar:
-    if True:
+#    if True:
+    try:
         while output_prefix.shape[1] < T:
             # q = M_q[prefix + x_0, x_1, .., x_(gamma-2)]
             prefix_len = output_prefix.shape[1]
@@ -196,6 +197,8 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
 
 
             sample_time += process_time_ns() - tt
+    except Exception as e:
+        print(e)
 
     if approx_model.config.is_encoder_decoder:
         output_prefix = torch.cat((prefix, output_prefix), dim=1)
@@ -282,7 +285,8 @@ def multi_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mo
 
 
 #    with tqdm(total=T, desc="speculative sampling") as pbar:
-    if True:
+#    if True:
+    try:
         while output_prefix.shape[1] < T:
             # q = M_q[prefix + x_0, x_1, .., x_(gamma-2)]
             prefix_len = output_prefix.shape[1]
@@ -530,7 +534,8 @@ def multi_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mo
                     mask[:, end] = True
                 output_prefix = output_prefix[mask][None,:] 
                 break
-
+    except Exception as e:
+        print(e)
 
 
 
@@ -602,86 +607,89 @@ def BiLD_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, target_
     else:
         last_check = 0
 
-    while prefix.shape[1] + decoder_input_ids.shape[1] - 1 < T:
-        #print('loop')
-        # q = M_q[prefix + x_0, x_1, .., x_(gamma-2)]
-        tt = process_time_ns()
-        
-        if approx_model.config.is_encoder_decoder == False:
-            x = approx_model_cache.generate(prefix, 1)
-            prefix_len = prefix.shape[1]
-        else:
-            x = approx_model_cache.generate(prefix, 1, decoder_input_ids = decoder_input_ids)
-            prefix_len = decoder_input_ids.shape[1]
-
-        q = approx_model_cache._prob_history[:,prefix_len-1:,:]
-
-        approx_call_times += 1
-        
-        approx_time += process_time_ns() - tt
-        tt = process_time_ns()
-
-        if torch.max(q[:,-1,:]) < fallback_thres or x.size(1)-last_check-1 >= gamma:
-            # use large model to check
-            ttt = process_time_ns()
-        
-            if target_model.config.is_encoder_decoder == False:
-                _ = target_model_cache.generate(x, 1)
-            else:
-                _ = target_model_cache.generate(prefix, 1, decoder_input_ids = x)
-            target_call_times += 1
-
-            target_time += process_time_ns() - ttt
-            p = target_model_cache._prob_history
-            n = x.size(1) - 1
-            l = 0
-            for i in range(last_check, x.size(1)-1):
-                j = x[:, i+1]
-                if -p[:, i, j].log() > rollback_thres:
-                    n = i
-                    break
-                l += 1
-            acc_len.append(l)
+    try:
+        while prefix.shape[1] + decoder_input_ids.shape[1] - 1 < T:
+            #print('loop')
+            # q = M_q[prefix + x_0, x_1, .., x_(gamma-2)]
+            tt = process_time_ns()
+          
             if approx_model.config.is_encoder_decoder == False:
-                prefix = x[:, :n+1]
+                x = approx_model_cache.generate(prefix, 1)
+                prefix_len = prefix.shape[1]
             else:
-                decoder_input_ids = x[:, :n+1]
+                x = approx_model_cache.generate(prefix, 1, decoder_input_ids = decoder_input_ids)
+                prefix_len = decoder_input_ids.shape[1]
+
+            q = approx_model_cache._prob_history[:,prefix_len-1:,:]
+   
+            approx_call_times += 1
+        
+            approx_time += process_time_ns() - tt
+            tt = process_time_ns()
+
+            if torch.max(q[:,-1,:]) < fallback_thres or x.size(1)-last_check-1 >= gamma:
+                # use large model to check
+                ttt = process_time_ns()
+        
+                if target_model.config.is_encoder_decoder == False:
+                    _ = target_model_cache.generate(x, 1)
+                else:
+                    _ = target_model_cache.generate(prefix, 1, decoder_input_ids = x)
+                target_call_times += 1
+ 
+                target_time += process_time_ns() - ttt
+                p = target_model_cache._prob_history
+                n = x.size(1) - 1
+                l = 0
+                for i in range(last_check, x.size(1)-1):
+                    j = x[:, i+1]
+                    if -p[:, i, j].log() > rollback_thres:
+                        n = i
+                        break
+                    l += 1
+                acc_len.append(l)
+                if approx_model.config.is_encoder_decoder == False:
+                    prefix = x[:, :n+1]
+                else:
+                    decoder_input_ids = x[:, :n+1]
                 
-            approx_model_cache.rollback(n+1)
-            t = sample(p[:, n, :])
-            target_model_cache.rollback(n+1)
-            last_check = n+1
+                approx_model_cache.rollback(n+1)
+                t = sample(p[:, n, :])
+                target_model_cache.rollback(n+1)
+                last_check = n+1
 
-            if approx_model.config.is_encoder_decoder == False:
-                prefix = torch.cat((prefix, t), dim=1)
-            else:
-                decoder_input_ids = torch.cat((decoder_input_ids, t), dim=1)
+                if approx_model.config.is_encoder_decoder == False:
+                    prefix = torch.cat((prefix, t), dim=1)
+                else:
+                    decoder_input_ids = torch.cat((decoder_input_ids, t), dim=1)
 
 
-        else: # continue
+            else: # continue
+                if approx_model.config.is_encoder_decoder:
+                    decoder_input_ids = x
+                else:
+                    prefix = x
+
             if approx_model.config.is_encoder_decoder:
-                decoder_input_ids = x
+                out = decoder_input_ids
             else:
-                prefix = x
+                out = prefix
 
-        if approx_model.config.is_encoder_decoder:
-            out = decoder_input_ids
-        else:
-            out = prefix
-
-        mask = (out == eos_token_id)
-        if mask.int().sum() > ori_eos_cnt:
-            mask = torch.cumsum(mask.float(), dim=1)
-            mask = (mask < ori_eos_cnt+1)
-            end = mask.int().sum()
-            if end < mask.size(1):
-                mask[:, end] = True
-            out = out[mask][None,:] 
-            break
+            mask = (out == eos_token_id)
+            if mask.int().sum() > ori_eos_cnt:
+                mask = torch.cumsum(mask.float(), dim=1)
+                mask = (mask < ori_eos_cnt+1)
+                end = mask.int().sum()
+                if end < mask.size(1):
+                    mask[:, end] = True
+                out = out[mask][None,:] 
+                break
 
 
 
-        sample_time += process_time_ns() - tt
+            sample_time += process_time_ns() - tt
+    except Exception as e:
+        print(e)
 
     if approx_model.config.is_encoder_decoder == True:
         out = torch.cat((prefix, out), dim=1)
@@ -768,107 +776,110 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
         pad_token_id = eos_token_id
     decoder_input_ids = torch.LongTensor([[pad_token_id]]).to(prefix.device)
 
-    while prefix.shape[1] + decoder_input_ids.shape[1] - 1 < T:
-        #print('loop')
-        # q = M_q[prefix + x_0, x_1, .., x_(gamma-2)]
-        tt = process_time_ns()
+    try:
+        while prefix.shape[1] + decoder_input_ids.shape[1] - 1 < T:
+            #print('loop')
+            # q = M_q[prefix + x_0, x_1, .., x_(gamma-2)]
+            tt = process_time_ns()
         
-        if approx_model.config.is_encoder_decoder == False:
-            x = approx_model_cache.generate(prefix, gamma)
-            prefix_len = prefix.shape[1]
-        else:
-            x = approx_model_cache.generate(prefix, gamma, decoder_input_ids = decoder_input_ids)
-            prefix_len = decoder_input_ids.shape[1]
+            if approx_model.config.is_encoder_decoder == False:
+                x = approx_model_cache.generate(prefix, gamma)
+                prefix_len = prefix.shape[1]
+            else:
+                x = approx_model_cache.generate(prefix, gamma, decoder_input_ids = decoder_input_ids)
+                prefix_len = decoder_input_ids.shape[1]
 
-        approx_call_times += 1
+            approx_call_times += 1
         
-        approx_time += process_time_ns() - tt
-        tt = process_time_ns()
+            approx_time += process_time_ns() - tt
+            tt = process_time_ns()
         
-        if target_model.config.is_encoder_decoder == False:
-            _ = target_model_cache.generate(x, 1)
-        else:
-            _ = target_model_cache.generate(prefix, 1, decoder_input_ids = x)
-        target_call_times += 1
+            if target_model.config.is_encoder_decoder == False:
+                _ = target_model_cache.generate(x, 1)
+            else:
+                _ = target_model_cache.generate(prefix, 1, decoder_input_ids = x)
+            target_call_times += 1
 
-        target_time += process_time_ns() - tt
-        tt = process_time_ns()
+            target_time += process_time_ns() - tt
+            tt = process_time_ns()
         
-        n = prefix_len + gamma - 1
+            n = prefix_len + gamma - 1
 
-        for i in range(gamma):
-            j = x[:, prefix_len + i]
-            acc_rate.append(((target_model_cache._prob_history[:, prefix_len + i - 1, j]) / (approx_model_cache._prob_history[:, prefix_len + i - 1, j])).item())
-            if acc_rate[-1] > 1:
-                acc_rate[-1] = 1
+            for i in range(gamma):
+                j = x[:, prefix_len + i]
+                acc_rate.append(((target_model_cache._prob_history[:, prefix_len + i - 1, j]) / (approx_model_cache._prob_history[:, prefix_len + i - 1, j])).item())
+                if acc_rate[-1] > 1:
+                    acc_rate[-1] = 1
         
 
-        l = 0
-        for i in range(gamma):
-            if random_seed:
-                torch.manual_seed(random_seed)
-            r = torch.rand(1, device = device)
-            j = x[:, prefix_len + i]
+            l = 0
+            for i in range(gamma):
+                if random_seed:
+                    torch.manual_seed(random_seed)
+                r = torch.rand(1, device = device)
+                j = x[:, prefix_len + i]
             
-            if r > (target_model_cache._prob_history[:, prefix_len + i - 1, j]) / (approx_model_cache._prob_history[:, prefix_len + i - 1, j]):
-                # reject
-                n = prefix_len + i - 1
+                if r > (target_model_cache._prob_history[:, prefix_len + i - 1, j]) / (approx_model_cache._prob_history[:, prefix_len + i - 1, j]):
+                    # reject
+                    n = prefix_len + i - 1
+                    break
+            
+                if verbose:
+                    print(f"approx guess accepted {j[0]}: \033[31m{Decoder().decode(torch.tensor([j]))}\033[0m")
+
+                accepted_count += 1
+                l += 1
+            acc_len.append(l)
+        
+            # print(f"n : {n}, i : {i}, prefix_len + gamma - 1: {prefix_len + gamma - 1}")
+            assert n >= prefix_len - 1, f"n {n}, prefix_len {prefix_len}"
+            if approx_model.config.is_encoder_decoder == False:
+                prefix = x[:, :n + 1]
+            else:
+                decoder_input_ids = x[:, :n+1]
+        
+            approx_model_cache.rollback(n+1)
+            #print('after roll back')
+            #print(approx_model_cache._prob_history.size())
+            assert approx_model_cache._prob_history.shape[-2] <= n + 1, f"approx_model prob list shape {approx_model_cache._prob_history.shape}, n {n}"
+        
+            if n < prefix_len + gamma - 1:
+                # reject someone, sample from the pos n
+                t = sample(max_fn(target_model_cache._prob_history[:, n, :] - approx_model_cache._prob_history[:, n, :]))
+                if verbose:
+                    print(f"target resamples at position {n}: \033[34m{Decoder().decode(t)}\033[0m")
+                resample_count += 1
+                target_model_cache.rollback(n+1)
+            else:
+                 # all approx model decoding accepted
+                assert n == target_model_cache._prob_history.shape[1] - 1
+                t = sample(target_model_cache._prob_history[:, -1, :])
+                if verbose:
+                    print(f"target samples {n}: \033[35m{Decoder().decode(t)}\033[0m")
+                target_sample_count += 1
+                target_model_cache.rollback(n+2)
+        
+        
+            if approx_model.config.is_encoder_decoder == False:
+                prefix = torch.cat((prefix, t), dim=1)
+                out = prefix
+            else:
+                decoder_input_ids = torch.cat((decoder_input_ids, t), dim=1)
+                out = decoder_input_ids
+
+            mask = (out == eos_token_id)
+            if mask.int().sum() > ori_eos_cnt:
+                mask = torch.cumsum(mask.float(), dim=1)
+                mask = (mask < ori_eos_cnt+1)
+                end = mask.int().sum()
+                if end < mask.size(1):
+                    mask[:, end] = True
+                out = out[mask][None,:] 
                 break
-            
-            if verbose:
-                print(f"approx guess accepted {j[0]}: \033[31m{Decoder().decode(torch.tensor([j]))}\033[0m")
 
-            accepted_count += 1
-            l += 1
-        acc_len.append(l)
-        
-        # print(f"n : {n}, i : {i}, prefix_len + gamma - 1: {prefix_len + gamma - 1}")
-        assert n >= prefix_len - 1, f"n {n}, prefix_len {prefix_len}"
-        if approx_model.config.is_encoder_decoder == False:
-            prefix = x[:, :n + 1]
-        else:
-            decoder_input_ids = x[:, :n+1]
-        
-        approx_model_cache.rollback(n+1)
-        #print('after roll back')
-        #print(approx_model_cache._prob_history.size())
-        assert approx_model_cache._prob_history.shape[-2] <= n + 1, f"approx_model prob list shape {approx_model_cache._prob_history.shape}, n {n}"
-        
-        if n < prefix_len + gamma - 1:
-            # reject someone, sample from the pos n
-            t = sample(max_fn(target_model_cache._prob_history[:, n, :] - approx_model_cache._prob_history[:, n, :]))
-            if verbose:
-                print(f"target resamples at position {n}: \033[34m{Decoder().decode(t)}\033[0m")
-            resample_count += 1
-            target_model_cache.rollback(n+1)
-        else:
-            # all approx model decoding accepted
-            assert n == target_model_cache._prob_history.shape[1] - 1
-            t = sample(target_model_cache._prob_history[:, -1, :])
-            if verbose:
-                print(f"target samples {n}: \033[35m{Decoder().decode(t)}\033[0m")
-            target_sample_count += 1
-            target_model_cache.rollback(n+2)
-        
-        
-        if approx_model.config.is_encoder_decoder == False:
-            prefix = torch.cat((prefix, t), dim=1)
-            out = prefix
-        else:
-            decoder_input_ids = torch.cat((decoder_input_ids, t), dim=1)
-            out = decoder_input_ids
-
-        mask = (out == eos_token_id)
-        if mask.int().sum() > ori_eos_cnt:
-            mask = torch.cumsum(mask.float(), dim=1)
-            mask = (mask < ori_eos_cnt+1)
-            end = mask.int().sum()
-            if end < mask.size(1):
-                mask[:, end] = True
-            out = out[mask][None,:] 
-            break
-
-        sample_time += process_time_ns() - tt
+            sample_time += process_time_ns() - tt
+    except Exception as e:
+        print(e)
 
         #print(f'n={n}, l={l}')
 

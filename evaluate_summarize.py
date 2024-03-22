@@ -118,11 +118,13 @@ def evaluate(approx_model_name, target_model_name,
                                                        trust_remote_code=True)
 
     else:
-        if 'AWQ' in approx_model_name:
-            from awq import AutoAWQForCausalLM
-            small_model = AutoAWQForCausalLM.from_quantized(approx_model_name, fuse_layers=True,
-                                          trust_remote_code=True, safetensors=True,
-                                          device_map="auto")
+        if 'GPTQ' in approx_model_name:
+            small_model = AutoModelForCausalLM.from_pretrained(approx_model_name, 
+                                                       device_map="auto",
+                                                       trust_remote_code=True)
+            small_model.generation_config.pad_token_id = tokenizer.eos_token_id
+
+
         else:
             small_model = AutoModelForCausalLM.from_pretrained(approx_model_name, 
                                                        torch_dtype=torch.float16,
@@ -134,6 +136,11 @@ def evaluate(approx_model_name, target_model_name,
                                                        torch_dtype=torch.float16,
                                                        device_map="auto",
                                                        trust_remote_code=True)
+    elif 'GPTQ' in target_model_name:
+        large_model = AutoModelForCausalLM.from_pretrained(target_model_name, 
+                                                       device_map="auto",
+                                                       trust_remote_code=True)
+        large_model.generation_config.pad_token_id = tokenizer.eos_token_id
 
     else:
         large_model = AutoModelForCausalLM.from_pretrained(target_model_name, 
@@ -163,11 +170,30 @@ def evaluate(approx_model_name, target_model_name,
     if dataset_name == 'cnndm':
         dataset = load_dataset('cnn_dailymail', '3.0.0', split='test')
         prefix = 'Summarize: '
-        input_dataset = [tokenizer.encode(prefix + s['article'], return_tensors="pt", max_length=512, truncation=True) for s in dataset]
-        output_dataset = [[s['highlights']] for s in dataset]
+        postfix = ""
         if 't5' in approx_model_name:
-            BiLD_params = [(0.2, 2), (0.3, 3)]
-            multi_params = [(2,1,16), (2,1,32), (4,1,16), (4,1,32)]
+            BiLD_params = [(0.2, 2)]
+            multi_params = [(2,1,16), (2,1,32)]
+            iid_params = [(4,2)]
+        elif 'opt' in approx_model_name:
+#            BiLD_params = [(0.3, 2), (0.3, 3)]
+            BiLD_params = [(0.3,2)]
+            multi_params = [(2,1,8),(4,1,8)]
+            iid_params = [ (4,2), ]
+        elif 'GPTQ' in approx_model_name:
+            #BiLD_params = [(0.9, 3), (0.9, 2), (0.9,1)]
+            BiLD_params = [(0.9, 3)]
+            #BiLD_params = []
+#            multi_params = [(4,4,8), (4,4,16), (4,8,8), (4,8,16), (6,4,16), (8,4,16)]
+#            multi_params += [(4,4,4), (4,6,6)]
+            multi_params = [(6,4,16)]
+#            iid_params = [(4,4), (6,4), (8,4)]
+            iid_params = [(4,4)]
+            #iid_params  = []
+            prefix = "[INST] <<SYS>> Please Summarize <</SYS>>"
+            postfix = '[/INST]'
+        input_dataset = [tokenizer.encode(prefix + s['article'] + postfix, return_tensors="pt", max_length=512, truncation=True) for s in dataset]
+        output_dataset = [[s['highlights']] for s in dataset]
 
     else:
         raise RuntimeError(f"Unrecognized dataset {dataset}")
@@ -220,7 +246,7 @@ def evaluate(approx_model_name, target_model_name,
             score = get_score(output, large_model, input_ids.size(1))
             scores.append(score.item())
             pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
-            if total_time / 1e9 > max_seconds:
+            if total_time / 1e9 > max_seconds*2:
                 print(f'terminated at {large_model_cnt}', file=log_f)
                 print(f'terminated at {large_model_cnt}')
                 break
@@ -231,10 +257,13 @@ def evaluate(approx_model_name, target_model_name,
         outputs = P.stdout.readlines()
         fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_large_model.pkl")
         power_total = get_total_power(outputs, t1, t2, fname)
+        time_limit = total_time/1e9/total_token
+        quality_limit = np.mean(scores)
 
 
         print(f'\nlarge model total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}', file=log_f)
         print(f'\nlarge model total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}')
+
         rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset[:large_model_cnt])
         print(f'rouge score = {rouge_score}')
         print(f'rouge score = {rouge_score}', file=log_f)
@@ -247,7 +276,7 @@ def evaluate(approx_model_name, target_model_name,
 
 
         # small model github implementation
-         
+        """
         total_time = 0
         total_token = 0
         approx_time = 0
@@ -300,7 +329,7 @@ def evaluate(approx_model_name, target_model_name,
         print(f'power/token: {power_total/total_token}')
         print(f'power/token: {power_total/total_token}', file=log_f)
 
-      
+       """
          
         # convetional speculative decoding
         total_time = 0
@@ -340,7 +369,7 @@ def evaluate(approx_model_name, target_model_name,
             score = get_score(output, large_model, input_ids.size(1))
             scores.append(score.item())
             pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
-            if total_time / 1e9 > max_seconds:
+            if total_time / 1e9 > max_seconds and cnt >= large_model_cnt:
                 print(f'terminated at {cnt}', file=log_f)
                 print(f'terminated at {cnt}')
                 break
@@ -374,8 +403,9 @@ def evaluate(approx_model_name, target_model_name,
 
        
         # BiLD speculative decoding
-        #for fallback_thres in [0.2, 0.3, 0.4,0.5,0.6,0.7,0.8,0.9]:
-        #    for rollback_thres in range(1,10):
+#        BiLD_stop = False
+#        for fallback_thres in [0.2, 0.3, 0.4,0.5,0.6, 0.7, 0.8, 0.9]:
+#            for rollback_thres in range(6,1,-1):
         if True:
             for fallback_thres, rollback_thres in BiLD_params:
 
@@ -420,7 +450,7 @@ def evaluate(approx_model_name, target_model_name,
                     score = get_score(output, large_model, input_ids.size(1))
                     scores.append(score.item())
                     pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
-                    if total_time / 1e9 > max_seconds:
+                    if total_time / 1e9 > max_seconds and cnt >= large_model_cnt:
                         print(f'terminated at {cnt}', file=log_f)
                         print(f'terminated at {cnt}')
                         break
@@ -451,16 +481,25 @@ def evaluate(approx_model_name, target_model_name,
                 print(f'power/token: {power_total/total_token}')
                 print(f'power/token: {power_total/total_token}', file=log_f)
 
+       #         if np.mean(scores) > quality_limit and total_time/1e9/total_token < time_limit:
+       #             print(f'Early Stop')
+       #             print(f'Early Stop', file=log_f)
+       #             BiLD_stop = True
+       #             break
+       #     if BiLD_stop == True:
+       #         break
+
 
                 #break
             #break
         
         # true beam speculative decoding
-        #for gamma in [2,4,6,8]:
-        #    width = 1
-        #    for num_beams in [2,4,8,16,32]:
+       # for gamma in [2,4,6,8]:
+       #     for width in [1,2,4, 8]:
+       #         num_beams = max(2, width)
         if True:
-            for gamma, width, num_beams in multi_params: 
+            for gamma, width, num_beams in multi_params:
+
                 if gamma * width > 32:
                     break
                 total_time = 0
@@ -505,7 +544,7 @@ def evaluate(approx_model_name, target_model_name,
                     score = get_score(output, large_model, input_ids.size(1))
                     scores.append(score.item())
                     pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
-                    if total_time / 1e9 > max_seconds:
+                    if total_time / 1e9 > max_seconds and cnt >= large_model_cnt:
                         print(f'terminated at {cnt}', file=log_f)
                         print(f'terminated at {cnt}')
                         break
@@ -613,10 +652,11 @@ def evaluate(approx_model_name, target_model_name,
         """
        
         # iid beam speculative decoding
- #       for gamma in [2,4,6,8]:
- #           for width in [2, 4]:
+#        for gamma in [2,4,6,8]:
+#            for width in [2, 4]:
         if True:
-            for gamma, width, num_beams in multi_params: 
+            for gamma, width in iid_params: 
+                num_beams = width
                 if gamma * width > 32:
                     break
  
@@ -663,7 +703,7 @@ def evaluate(approx_model_name, target_model_name,
                     score = get_score(output, large_model, input_ids.size(1))
                     scores.append(score.item())
                     pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
-                    if total_time / 1e9 > max_seconds:
+                    if total_time / 1e9 > max_seconds and cnt >= large_model_cnt:
                         print(f'terminated at {cnt}', file=log_f)
                         print(f'terminated at {cnt}')
                         break

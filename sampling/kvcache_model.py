@@ -85,6 +85,11 @@ class KVCacheModel():
             if not_cached_q.dim() == 2:
                 not_cached_q = torch.unsqueeze(not_cached_q, 0)
                 
+            if not_cached_q.isnan().any():
+                torch.save(last_input_id, '/llmss/last_input_ids.pth')
+                torch.save(self._past_key_values, '/llmss/past_key_values.pth')
+                raise RuntimeError('')
+
             for i in range(not_cached_q.shape[-2]):   
                 not_cached_q[:, i, :] = norm_logits(not_cached_q[:, i, :], self._temperature, self._top_k, self._top_p)    
                 

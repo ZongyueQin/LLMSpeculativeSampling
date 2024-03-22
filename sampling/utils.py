@@ -1,5 +1,6 @@
 import torch
 from torch.nn import functional as F
+import pickle
 
 # copy from https://github.com/LeeSinLiang/microGPT/blob/ed40cf9780dbeb180adfe94c227d4aa97e69250e/gpt.py
 def top_k_top_p_filter(logits: torch.Tensor, top_k: int = 0, top_p: float = 0.0):
@@ -41,14 +42,25 @@ def norm_logits(logits : torch.Tensor, temperature : float, top_k : float, top_p
         torch.Tensor: next token with shape as (batch,  1)
     """
     assert logits.dim() == 2
+    assert logits.isnan().any() == False
     logits = logits / temperature
     logits = top_k_top_p_filter(logits, top_k=top_k, top_p=top_p)
     probs = F.softmax(logits, dim=1)
+#    sample(probs, logits = logits)
+
     return probs
 
 
-def sample(probs : torch.Tensor, num_samples: int = 1):
-    idx_next = torch.multinomial(probs, num_samples=num_samples)
+def sample(probs : torch.Tensor, num_samples: int = 1, logits = None):
+    try:
+        idx_next = torch.multinomial(probs, num_samples=num_samples)
+    except Exception as e:
+        print(e)
+        print(probs.isinf().any(), probs.isnan().any(), (probs<0).any())
+        if logits is not None:
+            torch.save(logits, '/llmss/logits.pkl')
+
+        raise RuntimeError('')
     #if (idx_next.item() == 0) and False:
     #    raise RuntimeError
     return idx_next
