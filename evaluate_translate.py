@@ -1,5 +1,5 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '5,7'
+#os.environ['CUDA_VISIBLE_DEVICES'] = '5,7'
 os.environ['CURL_CA_BUNDLE'] = ''
 
 import torch
@@ -171,7 +171,7 @@ def evaluate(approx_model_name, target_model_name,
             prefix = 'translate English to German: '
             postfix = ''
             BiLD_params = [(0.2,2), (0.3,1)]
-            multi_params = [(4,2), (6,2)]
+            multi_params = [(2,2), (4,2)]
         elif 'opt' in approx_model_name:
             #prefix = 'English: ' 
             #postfix = '\nGerman: '
@@ -181,7 +181,7 @@ def evaluate(approx_model_name, target_model_name,
 #            multi_params = [(4,4), (6,4), (4,6)]
             BiLD_params = [(0.2,2)]
 #            multi_params = [(4,1,8),(4,2,8), (4,4,8), (4,8,8), (6,1,8), (6,2,8), (6,4,8)]
-            multi_params = [(4,6,8)]
+            multi_params = [(4,2,2)]
             iid_params = [(6,4)]
         elif 'AWQ' in approx_model_name:
             prefix = "[INST] <<SYS>> Please translate the English into German <</SYS>>"
@@ -525,6 +525,7 @@ def evaluate(approx_model_name, target_model_name,
            # break
         if True:
             for gamma, width, num_beams in multi_params:
+                assert width == num_beams
 #                num_beams = width
                 if gamma * width > 32:
                     break
