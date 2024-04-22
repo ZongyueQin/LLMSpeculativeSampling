@@ -1,4 +1,5 @@
 import torch
+import pickle
 from tqdm import tqdm
 import torch
 import torch.nn.functional as F
@@ -12,6 +13,430 @@ import os
 
 @torch.no_grad()
 def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, target_model : torch.nn.Module, 
+                         eos_token_id, pad_token_id, max_len : int , gamma : int = 4, width : int = 8, num_beams: int = 8,
+                         temperature : float = 1, top_k : int = 0, top_p : float = 0, verbose : bool = False, random_seed : int = None,
+                         details : bool = False) -> torch.Tensor:
+    #print(prefix)
+    #xxx = input()
+    if pad_token_id is None:
+        pad_token_id = eos_token_id
+
+    seq_len = prefix.shape[1]
+    ori_eos_cnt = (prefix == eos_token_id).int().sum()
+    T = seq_len + max_len
+    acc_len = []
+    acc_rate = []
+
+    approx_model_cache = KVCacheModel(approx_model, temperature, top_k, top_p)
+    target_model_cache = KVCacheModel(target_model, temperature, top_k, top_p)
+    assert prefix.shape[0] == 1, "input batch size must be 1"
+
+    approx_time = 0
+    target_time = 0
+    sample_time = 0
+    target_call_times = 0
+    approx_call_times = 0
+    d = {
+                'approx_time': approx_time,
+                'target_time': target_time,
+                'other_time': sample_time,
+                'acc_len': acc_len,
+                'acc_rate': np.mean(acc_rate),
+                'target_call_times': target_call_times,
+                'approx_call_times': approx_call_times
+            }
+
+    if approx_model.config.is_encoder_decoder == True:
+        encoder_outputs = approx_model.get_encoder()(
+                    prefix, return_dict=True
+                    )
+        for key, val in encoder_outputs.items():
+            if key != 'last_hidden_state':
+                del encdoer_outputs[key]
+        output_prefix = torch.LongTensor([[pad_token_id]]).to(prefix.device)
+        T = max_len
+    else:
+        output_prefix = prefix
+
+    start_t = process_time_ns()
+
+
+#    with tqdm(total=T, desc="speculative sampling") as pbar:
+    if True:
+        while output_prefix.shape[1] < T:
+            # q = M_q[prefix + x_0, x_1, .., x_(gamma-2)]
+            prefix_len = output_prefix.shape[1]
+
+            # generate x of size width * (prefix_len+gamma)
+            tt = process_time_ns()
+
+            if approx_model.config.is_encoder_decoder:
+                encoder_outputs.last_hidden_state = encoder_outputs.last_hidden_state[0:1]
+
+                ret = approx_model_cache.beam_sample_with_kv_cache(
+                       output_prefix, 
+                       gamma=gamma, 
+                       num_beams=num_beams, 
+                       top_k=top_k, top_p=top_p,
+                       num_return_sequences=width,
+                       return_dict_in_generate = True,
+                       output_scores = True,
+                       encoder_outputs = encoder_outputs,
+                       return_intermediate_results = True,
+                       ret_seq_scores = True
+                       )
+            else:
+                ret = approx_model_cache.beam_sample_with_kv_cache(
+                       output_prefix, 
+                       gamma=gamma, 
+                       num_beams=num_beams, 
+                       top_k=top_k, top_p=top_p,
+                       num_return_sequences=width,
+                       return_dict_in_generate = True,
+                       return_intermediate_results = True,
+                       output_scores = True,
+                       ret_seq_scores = True
+                       )
+            out, all_seq, all_beam_idx, all_next_token, all_prob = ret[0],ret[1],ret[2],ret[3],ret[4]
+            #return all_seq[-1][0:1], d
+            """
+            for x in all_seq:
+                print(x.size())
+            xxx = input()
+            for x in all_beam_idx:
+                print(x.size())
+            xxx = input()
+            for x in all_next_token:
+                print(x.size())
+            xxx = input()
+            for x in all_prob:
+                print(x.size())
+            xxx = input('end')
+            """
+
+            #TODO change x, padding
+            max_len = all_seq[-1].size(1)
+            x = [F.pad(seq, (0,max_len-seq.size(1),0,0), 'constant', pad_token_id) for seq in all_seq]
+            att_mask = [F.pad(torch.ones_like(seq), (0,max_len-seq.size(1),0,0), 'constant', pad_token_id) for seq in all_seq]
+
+            x = torch.concat(x, dim=0)
+            att_mask = torch.concat(att_mask, dim=0)
+
+            #x = out['sequences'] # width * (prefix_len+gamma)
+            #q, seq_q = out['scores'] # tuples of gamma * (width * vocab) ?
+ 
+            inc_len = x.shape[1] - prefix_len
+            approx_call_times += 1
+            approx_time += process_time_ns() - tt
+
+            #print(x[:4])
+            #print('=====================')
+
+            tt = process_time_ns()
+            if target_model.config.is_encoder_decoder == False:
+                _ = target_model_cache.generate(x, 1, attention_mask = att_mask)
+            else:
+                _ = target_model_cache.generate(
+                        prefix.repeat_interleave(x.size(0), dim=0),
+                        1, 
+                        attention_mask = att_mask,
+                        decoder_input_ids = x)
+            target_call_times += 1
+            p = target_model_cache._prob_history
+            vocab_size = p.size(-1)
+            
+            target_time += process_time_ns() - tt
+
+            
+            """ compute acc rate """
+            """
+            for w in range(width):
+                cur_target_p = 0
+                for i in range(gamma):
+                    if prefix_len + i >= x.size(1):
+                        break
+                    j = x[w, prefix_len+i]
+                    cur_target_p += torch.log(p[w, prefix_len + i - 1, j])
+                    cur_draft_p = seq_q[w, i]
+                    acc_rate.append((torch.exp(cur_target_p)/cur_draft_p).item())
+                    if acc_rate[-1] > 1:
+                        acc_rate[-1] = 1
+            """
+
+            """ verification process """
+            tt = process_time_ns()
+
+            cur_valid_beam = torch.zeros_like(all_beam_idx[0])
+            cur_valid_beam[0] = 1
+            cur_valid_beam = cur_valid_beam.bool()
+            beam_scores = torch.zeros_like(all_prob[0])
+            n = prefix_len - 1
+
+            max_l = 0
+            start = 0
+            for i in range(inc_len):
+                #print('beam scores')
+                #print(beam_scores)
+                #print(cur_valid_beam)
+                #TODO check accept/reject decision, since we set approx and target model the same, most of decision should be accept
+                end = start + num_beams
+                cur_beam_idx = all_beam_idx[i]
+                #print(cur_beam_idx)
+                # get sampled distribution of the small model
+                q_scores = all_prob[i]
+                #print(q_scores)
+                # speacial treatment for i==0
+                if i == 0:
+                    cur_beam_idx[:] = 0
+                    q_scores = q_scores * num_beams
+
+                # shift cur_beam_idx by cur_valid_beam
+                shift = torch.cumsum(cur_valid_beam.long(),dim=0)-1
+                shift_beam_idx = shift[cur_beam_idx]
+
+                # Step 1 get sampling distribution of the large model
+                #print('prefix_len+i')
+                #print(prefix_len+i-1,i)
+                #print(x[0,prefix_len+i-1])
+                cur_p = p[start:end, prefix_len+i-1].squeeze() # shape: batch_size * V 
+                #print(cur_p[0].nonzero())
+                #print(cur_p[1].nonzero())
+                cur_p = cur_p[cur_valid_beam] # shape: num_valid_beam * V
+                #print(cur_p.nonzero())
+                #print('===============')
+                #print(prefix)
+                #print(x[0])
+                #xxx = input()
+
+                from_valid_beam = cur_valid_beam[cur_beam_idx]
+                #print(from_valid_beam)
+                if from_valid_beam.any():
+                    p_next_token_scores = beam_scores[cur_valid_beam][:,None].expand_as(cur_p) + cur_p.log()
+                    p_next_token_scores = torch.softmax(p_next_token_scores.view(-1), dim=0)
+                    shift_beam_idx = torch.clamp(shift_beam_idx, min=0)
+                    cur_sample_idx = shift_beam_idx * vocab_size + all_next_token[i]
+                    #TODO update beam score
+                    """
+                    pickle.dump(p_next_token_scores, open('tmp.pkl','wb'))
+                    print(p_next_token_scores.size())
+                    print(cur_sample_idx)
+                    print(cur_valid_beam)
+                    print(cur_beam_idx)
+                    print(shift)
+                    print(shift_beam_idx)
+                    print('========================')
+                    """
+                    p_scores = torch.gather(p_next_token_scores, dim=0, index=cur_sample_idx)
+                    mask = from_valid_beam.logical_not()
+                    p_scores[mask] = 0
+
+
+                    r = torch.rand(1, device = p.device)
+                    accept = (p_scores/q_scores) > r
+                 #   print('p_scores')
+                 #   print(p_scores)
+                 #   print(p_scores/q_scores)
+             
+                else:
+                    # non of the sample is from valid beams, all reject
+                    accept = from_valid_beam
+
+                acc_rate.append(accept.float().mean().item())
+                #print(accept)
+
+                if accept.any():
+                    # TODO Step 5 update cur_valid_beam
+                    cur_valid_beam = accept
+                  #  print(p_scores)
+                    beam_scores = p_scores.log() 
+                    n += 1
+                    max_l += 1
+                    start = end
+                else:
+                    # if all draft are rejected, terminate and start re-sample
+                    break
+
+            #TODO re-sample based on cur_valid_beam and p
+            end=start + num_beams
+            
+            if max_l == inc_len: # all accept
+
+                cur_p = p[start:end, -1]
+                cur_p = cur_p[cur_valid_beam]
+                p_next_token_scores = beam_scores[cur_valid_beam][:,None].expand_as(cur_p) + cur_p.log()
+                p_next_token_scores = torch.softmax(p_next_token_scores.view(-1), dim=0)
+                t = sample(p_next_token_scores)
+                beam_idx = torch.div(t, vocab_size, rounding_mode='floor').item()
+                token = t % vocab_size
+                token = token[None,:]
+                beam_cnt = 0
+                for i in range(num_beams):
+                    if cur_valid_beam[i] == True:
+                        beam_cnt += 1
+                    if beam_idx == beam_cnt - 1:
+                        output_prefix = x[start+i:start+i+1, :n + 1]
+                        choice = start + i
+                        break
+                output_prefix = torch.concat([output_prefix, token], dim=1)
+                target_model_cache.rollback(n+2, choice)
+
+
+            else:
+                cur_p = p[start:end, n]
+                #print(cur_p.sum(dim=1))
+                cur_p = cur_p[cur_valid_beam]
+                p_next_token_scores = beam_scores[cur_valid_beam][:,None].expand_as(cur_p) + cur_p.log()
+                op = p_next_token_scores 
+                p_next_token_scores = torch.softmax(p_next_token_scores.view(-1), dim=0)
+                mask = p_next_token_scores.isnan().view(op.size(0),op.size(1)) 
+                #print(mask.float().sum())
+                #print(op.size())
+                #print(beam_scores[cur_valid_beam])
+
+                #print(p_next_token_scores.isinf().any())
+                #print(p_next_token_scores.isnan().any())
+                #print(op[mask])
+                #print(cur_p[mask])
+                #print(cur_p[mask].log())
+                #print(beam_scores[cur_valid_beam][:,None].expand_as(cur_p)[mask])
+
+                #TODO minus q
+                t = sample(p_next_token_scores)
+                beam_idx = torch.div(t, vocab_size, rounding_mode='floor')
+                beam_idx = beam_idx.item()
+                token = t % vocab_size
+                token = token[None,:]
+                beam_cnt = 0
+                for i in range(num_beams):
+                    if cur_valid_beam[i] == True:
+                        beam_cnt += 1
+                    if beam_idx == beam_cnt - 1:
+                        output_prefix = x[start+i:start+i+1, :n + 1]
+                        choice = start+i
+                        break
+                output_prefix = torch.concat([output_prefix, token], dim=1)
+                target_model_cache.rollback(n+1, choice)
+
+            last_beam = min(max_l, inc_len-1)
+
+            approx_model_cache.beam_rollback(last_beam, choice%num_beams)
+
+
+
+
+            """
+            is_all_accept = False
+            n = prefix_len - 1
+            max_n = prefix_len - 1
+            max_l = 0
+            choice = 0
+            for w in range(width):
+                cur_n = prefix_len - 1
+                cur_l = 0
+                cur_all_accept = True
+
+                cur_target_p = 0
+                for i in range(inc_len):
+                    if prefix_len + i >= x.size(1):
+                        break
+                    if random_seed:
+                        torch.manual_seed(random_seed)
+                    r = torch.rand(1, device = p.device)
+                    j = x[w, prefix_len + i]
+
+                    cur_target_p += torch.log(p[w, prefix_len + i - 1, j])
+                    cur_draft_p = seq_q[w, i]
+               
+                    if r < torch.min(torch.tensor([1], device=q.device), torch.exp(cur_target_p)/cur_draft_p):
+                        cur_l += 1
+                    # accept, and update n
+                        cur_n += 1
+                    else:
+                        # reject
+                        cur_all_accept = False
+                        break
+                if cur_l > max_l:
+                    assert cur_n > max_n, f"cur_n {cur_n}, max_n {max_n}"
+                    max_n = cur_n
+                    max_l = cur_l
+                    choice = w
+                    if cur_all_accept == True:
+                        is_all_accept = True
+                        break
+            acc_len.append(max_l)
+
+            n = max_n
+            """
+            """
+            output_prefix = x[choice:choice+1, :n + 1]
+            
+#            print(inc_len)
+#            xxx = input()
+        
+
+            #TODO change re-sample to beam search
+            if max_l == inc_len: # all accept
+                #TODO get choice
+
+                t = sample(p[choice:choice+1, -1, :])
+                target_model_cache.rollback(n+2, choice)
+
+            else:
+                #print(torch.sum(p[choice,n,:]).item(), torch.sum(q[choice,max_l,:]).item())
+                #tmp = p[choice,n,:] - q[choice,max_l,:]
+                #print(torch.sum((tmp>0).float()).item(), torch.sum((tmp<=0).float()).item())
+                #print(torch.sum((p[choice,n,:]==q[choice,max_l,:]).float()).item())
+
+                #t = sample(max_fn(p[choice:choice+1, n, :] - q[choice:choice+1, max_l, :]))
+                t = sample(max_fn(p[choice:choice+1, n, :]))
+
+                target_model_cache.rollback(n+1, choice)
+           
+            
+            output_prefix = torch.cat((output_prefix, t), dim=1)
+            """
+            #pbar.update(n - pbar.n)
+            mask = (output_prefix == eos_token_id)
+            if mask.int().sum() > ori_eos_cnt:
+                mask = torch.cumsum(mask.float(), dim=1)
+                mask = (mask < ori_eos_cnt+1)
+                end = mask.int().sum()
+                if end < mask.size(1):
+                    mask[:, end] = True
+                output_prefix = output_prefix[mask][None,:] 
+                break
+
+
+
+
+            sample_time += process_time_ns() - tt
+
+    if approx_model.config.is_encoder_decoder:
+        output_prefix = torch.cat((prefix, output_prefix), dim=1)
+
+    if verbose:
+        print('approx model time', approx_time/1e9)
+        print('target model time', target_time/1e9)
+        print('other time', sample_time/1e9)
+        print('inner overall time', (process_time_ns()-start_t)/1e9)
+        print('acc len', np.mean(acc_len), len(acc_len), acc_len)
+    if details == True:
+        d = {
+                'approx_time': approx_time,
+                'target_time': target_time,
+                'other_time': sample_time,
+                'acc_len': acc_len,
+                'acc_rate': np.mean(acc_rate),
+                'target_call_times': target_call_times,
+                'approx_call_times': approx_call_times
+            }
+        return output_prefix, d
+    else:
+        return output_prefix
+
+
+@torch.no_grad()
+def mjsd_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, target_model : torch.nn.Module, 
                          eos_token_id, pad_token_id, max_len : int , gamma : int = 4, width : int = 8, num_beams: int = 8,
                          temperature : float = 1, top_k : int = 0, top_p : float = 0, verbose : bool = False, random_seed : int = None,
                          details : bool = False) -> torch.Tensor:
