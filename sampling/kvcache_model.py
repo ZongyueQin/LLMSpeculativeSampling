@@ -27,16 +27,24 @@ class KVCacheModel():
         self._top_k = top_k
         self._top_p = top_p
 
-    def _forward_with_kvcache(self, input_ids : torch.Tensor, use_debug = False, 
+    def _forward_with_kvcache(self, input_ids : torch.Tensor, use_debug = False,
+            attention_mask = None,
             decoder_input_ids = None) -> torch.Tensor:
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
 
         if self._past_key_values is None:
             assert self._prob_history is None, f"{self._prob_history.shape}"
             # the first forward (prefill) returns the prompt's logits
             if self._model.config.is_encoder_decoder == False:
+#                outputs = self._model(input_ids, attention_mask=attention_mask)
                 outputs = self._model(input_ids)
+
             else:
+#                outputs = self._model(input_ids, decoder_input_ids = decoder_input_ids, use_cache=True, decoder_attention_mask = attention_mask)
+                #print(input_ids.size(), decoder_input_ids.size())
                 outputs = self._model(input_ids, decoder_input_ids = decoder_input_ids, use_cache=True)
+
             self._prob_history = outputs.logits
             for i in range(self._prob_history.shape[-2]):   
                 self._prob_history[:, i, :] = norm_logits(self._prob_history[:, i, :], self._temperature, self._top_k, self._top_p)
@@ -109,6 +117,7 @@ class KVCacheModel():
                                     decoder_input_ids = None,
                                     multi: int = 1,
                                     strategy: str = "beam",
+                                    attention_mask = None,
                                     use_debug = False) -> torch.Tensor:
         """ forward the model gamma times
 
@@ -127,7 +136,7 @@ class KVCacheModel():
 
 
         for _ in range(gamma):
-            q = self._forward_with_kvcache(x, use_debug, decoder_input_ids = decoder_input_ids)
+            q = self._forward_with_kvcache(x, use_debug, decoder_input_ids = decoder_input_ids, attention_mask = attention_mask)
             if multi == 1:
                 next_tok = sample(q)
             else:
@@ -149,12 +158,20 @@ class KVCacheModel():
     @torch.no_grad()
     def generate(self, input : torch.Tensor, gamma : int,
                  decoder_input_ids = None,
+                 attention_mask = None,
                  multi: int = 1, strategy: str = "beam") -> torch.Tensor:
         if self._model.config.is_encoder_decoder == True and decoder_input_ids is None:
             raise RuntimeError("It is an encoder-decoder model, please set decoder_input_ids")
-        output = self._generate_with_kvcache(input, gamma, decoder_input_ids = decoder_input_ids, multi=multi, strategy=strategy)
+        output = self._generate_with_kvcache(input, gamma, decoder_input_ids = decoder_input_ids, multi=multi, strategy=strategy, attention_mask = attention_mask)
         return output
-    
+
+    @torch.no_grad()
+    def beam_rollback(self, beam_idx, choice):
+#        print(beam_idx)
+#        print(len(self.beam_past_key_values))
+        self._past_key_values = self.beam_past_key_values[beam_idx]
+        self.rollback(-1, choice)
+
     @torch.no_grad()
     def rollback(self, end_pos : int, choice=None):
         past_key_values_trimmed = []
@@ -226,6 +243,7 @@ class KVCacheModel():
             acc_rate_head = None,
             acc_rate_thres = 0.4,
             ret_seq_scores = False,
+            return_intermediate_results = False,
             **kwargs
             ):
         """ forward the model gamma times
@@ -315,8 +333,10 @@ class KVCacheModel():
                                 acc_rate_head = acc_rate_head,
                                 acc_rate_thres = acc_rate_thres,
                                 ret_seq_scores = ret_seq_scores,
+                                return_intermediate_results = return_intermediate_results,
                                 **model_kwargs,
                                 )
+
 
 
     @torch.no_grad()
@@ -339,10 +359,10 @@ class KVCacheModel():
         acc_rate_head = None,
         acc_rate_thres = 0.4,
         ret_seq_scores = False,
+        return_intermediate_results = False,
         **model_kwargs,
     ): 
-        if acc_rate_head is not None:
-            output_hidden_states = True
+        self.beam_past_key_values = []
         """rewrite beam sample with kv cache"""
         # init values
         logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
@@ -401,6 +421,10 @@ class KVCacheModel():
         new_len = 0
         seq_acc_rate = torch.ones((batch_size, num_beams), dtype=torch.float, device=input_ids.device)
 
+        all_intermediate_beams = []
+        all_beam_indices = []
+        all_next_tokens = []
+        all_beam_scores = []
 
         while True:
             if synced_gpus:
@@ -412,6 +436,7 @@ class KVCacheModel():
                 # did all peers finish? the reduced sum will be 0.0 then
                 if this_peer_finished_flag.item() == 0.0:
                     break
+
 
             if self._past_key_values is None:
                 model_inputs = self._model.prepare_inputs_for_generation(input_ids, **model_kwargs)
@@ -465,10 +490,7 @@ class KVCacheModel():
             
             #print(next_token_scores.isnan().any())
 
-            if acc_rate_head is not None:
-                acc_rate = acc_rate_head(outputs.hidden_states[-1][:,-1:,:].float()).squeeze() # batch_size*num_beams
-                seq_acc_rate = seq_acc_rate * acc_rate.view(batch_size, num_beams) # make it shape [batch_size, num_beams]
-            
+           
             # Store scores, attentions and hidden_states when required
             if return_dict_in_generate:
                 #if output_scores:
@@ -498,31 +520,13 @@ class KVCacheModel():
 
             
             #  add alternative sort criterion based on predicted acceptance rate
-            if acc_rate_head is None:
-                next_tokens = torch.multinomial(probs, num_samples=2 * num_beams)
-                next_token_scores = torch.gather(next_token_scores, -1, next_tokens)
-                #print('axxxxx')
-                #print(next_token_scores.isinf().any())
-                next_token_scores, _indices = torch.sort(next_token_scores, descending=True, dim=1)
-                next_tokens = torch.gather(next_tokens, -1, _indices)
+            next_tokens = torch.multinomial(probs, num_samples=2 * num_beams)
+            next_token_scores = torch.gather(next_token_scores, -1, next_tokens)
+            next_token_scores, _indices = torch.sort(next_token_scores, descending=True, dim=1)
+            next_tokens = torch.gather(next_tokens, -1, _indices)
 
-                next_indices = torch.div(next_tokens, vocab_size, rounding_mode="floor")
-                next_tokens = next_tokens % vocab_size
-            else:
-                next_tokens = torch.multinomial(probs, num_samples=3 * num_beams) # [batch_size, 2*num_beams]
-                next_token_scores = torch.gather(next_token_scores, -1, next_tokens)
-                
-                next_indices = torch.div(next_tokens, vocab_size, rounding_mode="floor") 
-                candidate_acc_rate = torch.gather(seq_acc_rate, -1, next_indices)
-                candidate_scores = 100*candidate_acc_rate + next_token_scores
-                
-                _, _indices = torch.sort(candidate_scores, descending=True,dim=1)
-                _indices = _indices[:,:2*num_beams]
-                
-                next_tokens = torch.gather(next_tokens, -1, _indices)
-
-                next_indices = torch.div(next_tokens, vocab_size, rounding_mode="floor")
-                next_tokens = next_tokens % vocab_size
+            next_indices = torch.div(next_tokens, vocab_size, rounding_mode="floor")
+            next_tokens = next_tokens % vocab_size
             next_token_scores = torch.clamp(next_token_scores, min=-1e10)
                 
             # stateless
@@ -539,8 +543,16 @@ class KVCacheModel():
             beam_next_tokens = beam_outputs["next_beam_tokens"]
             beam_idx = beam_outputs["next_beam_indices"]
 
-            if acc_rate_head is not None:
-                seq_acc_rate = torch.gather(seq_acc_rate, -1, beam_idx.view(batch_size, num_beams))
+
+            if return_intermediate_results == True: 
+                all_intermediate_beams.append(input_ids)
+                all_beam_indices.append(beam_idx)
+                all_next_tokens.append(beam_next_tokens)
+                sample_id = beam_idx * vocab_size + beam_next_tokens
+                sample_id = sample_id.view(batch_size, -1)
+                sample_prob = torch.gather(probs, -1, sample_id).view(-1)
+                all_beam_scores.append(sample_prob)
+
                 
             input_ids = torch.cat([input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)], dim=-1)
 
@@ -549,7 +561,11 @@ class KVCacheModel():
             )
             if model_kwargs["past_key_values"] is not None:
                 model_kwargs["past_key_values"] = self._model._reorder_cache(model_kwargs["past_key_values"], beam_idx)
-                self._past_key_values = model_kwargs["past_key_values"]
+                if return_intermediate_results == False:
+                    self._past_key_values = model_kwargs["past_key_values"]
+                else:
+                    self.beam_past_key_values.append(model_kwargs["past_key_values"])
+                    pass
 
             if scores is not None:
                 scores = torch.cat([scores, nn.functional.softmax(next_token_scores_processed, dim=-1)[:,None, :]], dim=1)
@@ -598,6 +614,7 @@ class KVCacheModel():
             beam_indices=beam_indices,
         )
 
+
         if return_dict_in_generate:
             if not output_scores:
                 sequence_outputs["sequence_scores"] = None
@@ -606,27 +623,65 @@ class KVCacheModel():
             else:
                 ret_scores = scores
 
-            if self._model.config.is_encoder_decoder:
-                return BeamSampleEncoderDecoderOutput(
-                    sequences=sequence_outputs["sequences"][:, :cur_len],
-                    sequences_scores=sequence_outputs["sequence_scores"],
-                    scores=ret_scores,
-                    beam_indices=sequence_outputs["beam_indices"],
-                    encoder_attentions=encoder_attentions,
-                    encoder_hidden_states=encoder_hidden_states,
-                    decoder_attentions=decoder_attentions,
-                    cross_attentions=cross_attentions,
-                    decoder_hidden_states=decoder_hidden_states,
-                )
+
+            if return_intermediate_results == False:
+                if self._model.config.is_encoder_decoder:
+                    return BeamSampleEncoderDecoderOutput(
+                      sequences=sequence_outputs["sequences"][:, :cur_len],
+                      sequences_scores=sequence_outputs["sequence_scores"],
+                      scores=ret_scores,
+                      beam_indices=sequence_outputs["beam_indices"],
+                      encoder_attentions=encoder_attentions,
+                      encoder_hidden_states=encoder_hidden_states,
+                      decoder_attentions=decoder_attentions,
+                      cross_attentions=cross_attentions,
+                      decoder_hidden_states=decoder_hidden_states,
+                    )
+
+                else:
+                    return BeamSampleDecoderOnlyOutput(
+                      sequences=sequence_outputs["sequences"][:, :cur_len],
+                      sequences_scores=sequence_outputs["sequence_scores"],
+                      scores=ret_scores,
+                      beam_indices=sequence_outputs["beam_indices"],
+                      attentions=decoder_attentions,
+                      hidden_states=decoder_hidden_states,
+                    )
             else:
-                return BeamSampleDecoderOnlyOutput(
-                    sequences=sequence_outputs["sequences"][:, :cur_len],
-                    sequences_scores=sequence_outputs["sequence_scores"],
-                    scores=ret_scores,
-                    beam_indices=sequence_outputs["beam_indices"],
-                    attentions=decoder_attentions,
-                    hidden_states=decoder_hidden_states,
-                )
+                all_intermediate_beams.append(sequence_outputs['sequences'][:, :cur_len])
+
+                if self._model.config.is_encoder_decoder:
+                    return (BeamSampleEncoderDecoderOutput(
+                      sequences=sequence_outputs["sequences"][:, :cur_len],
+                      sequences_scores=sequence_outputs["sequence_scores"],
+                      scores=ret_scores,
+                      beam_indices=sequence_outputs["beam_indices"],
+                      encoder_attentions=encoder_attentions,
+                      encoder_hidden_states=encoder_hidden_states,
+                      decoder_attentions=decoder_attentions,
+                      cross_attentions=cross_attentions,
+                      decoder_hidden_states=decoder_hidden_states,
+                  ),
+                  all_intermediate_beams,
+                  all_beam_indices,
+                  all_next_tokens,
+                  all_beam_scores)
+
+
+                else:
+                    return (BeamSampleDecoderOnlyOutput(
+                      sequences=sequence_outputs["sequences"][:, :cur_len],
+                      sequences_scores=sequence_outputs["sequence_scores"],
+                      scores=ret_scores,
+                      beam_indices=sequence_outputs["beam_indices"],
+                      attentions=decoder_attentions,
+                      hidden_states=decoder_hidden_states,
+                  ),
+                  all_intermediate_beams,
+                  all_beam_indices,
+                  all_next_tokens,
+                  all_beam_scores)
+
         else:
             return sequence_outputs["sequences"]
 
