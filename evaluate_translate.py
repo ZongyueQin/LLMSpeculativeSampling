@@ -22,6 +22,7 @@ import numpy as np
 import random
 import subprocess
 import pickle
+from pyJoules.energy_meter import measure_energy
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='args for main.py')
@@ -90,6 +91,7 @@ def get_total_power(outputs, t1, t2, fname):
     return total_power
 
 
+@measure_energy
 def evaluate(approx_model_name, target_model_name, 
         dataset_name, 
         acc_rate_head_path = None, num_tokens=20, 
@@ -124,14 +126,17 @@ def evaluate(approx_model_name, target_model_name,
     else:
         if 'AWQ' in approx_model_name:
             from awq import AutoAWQForCausalLM
-            small_model = AutoAWQForCausalLM.from_quantized(approx_model_name, fuse_layers=True,
-                                          trust_remote_code=True, safetensors=True,
+            small_model = AutoModelForCausalLM.from_pretrained(approx_model_name, 
+                                          #fuse_layers=True,
+                                          trust_remote_code=True, 
+                                          #safetensors=True,
                                           device_map="auto")
         else:
             small_model = AutoModelForCausalLM.from_pretrained(approx_model_name, 
                                                        torch_dtype=torch.float16,
                                                        device_map="auto",
                                                        trust_remote_code=True)
+            tokenizer.pad_token_id = tokenizer.eos_token_id
 
     if 't5' in target_model_name:
         large_model = AutoModelForSeq2SeqLM.from_pretrained(target_model_name, 
@@ -139,24 +144,18 @@ def evaluate(approx_model_name, target_model_name,
                                                        device_map="auto",
                                                        trust_remote_code=True)
 
+    elif 'AWQ' in target_model_name:
+        large_model = AutoModelForCausalLM.from_pretrained(target_model_name, 
+                                         #fuse_layers=True,
+                                         trust_remote_code=True, 
+                                         #safetensors=True,
+                                         device_map="auto")
     else:
         large_model = AutoModelForCausalLM.from_pretrained(target_model_name, 
                                                        torch_dtype=torch.float16,
                                                        device_map="auto",
+                                                       offload_folder="offload",
                                                        trust_remote_code=True)
-
-    if acc_rate_head_path is not None:
-        final_dim = 768
-        acc_rate_head = torch.nn.Sequential(
-                                torch.nn.Linear(final_dim, 100),
-                                torch.nn.ReLU(),
-                                torch.nn.Linear(100,1)
-                                )
-        state_dict = torch.load(acc_rate_head_path)
-        acc_rate_head.load_state_dict(state_dict)
-        acc_rate_head.to(torch_device)
-    else:
-        acc_rate_head = None
 
 
 
@@ -177,8 +176,17 @@ def evaluate(approx_model_name, target_model_name,
             #postfix = '\nGerman: '
             prefix = 'Please translate the input into German. \nInput:'
             postfix = '\nGerman Translation: '
-            BiLD_params = [(0.2, 2), (0.3, 2), (0.3, 3)]
-            multi_params = [(4,4), (6,4), (4,6)]
+#            BiLD_params = [(0.2, 2), (0.3, 2), (0.3, 3)]
+#            multi_params = [(4,4), (6,4), (4,6)]
+            BiLD_params = [(0.2,2)]
+#            multi_params = [(4,1,8),(4,2,8), (4,4,8), (4,8,8), (6,1,8), (6,2,8), (6,4,8)]
+            multi_params = [(4,6,8)]
+            iid_params = [(6,4)]
+        elif 'AWQ' in approx_model_name:
+            prefix = "[INST] <<SYS>> Please translate the English into German <</SYS>>"
+            postfix = '[/INST]'
+            BiLD_params = [(0.2,2)]
+            multi_params = [(4,2)]
 
         else:
             prefix = 'translate English to German: '
@@ -197,9 +205,10 @@ def evaluate(approx_model_name, target_model_name,
     length_interval = [100000]
 
     bleu = hf_evaluate.load('bleu') 
-    prefix = "/llmss/LLMSpeculativeSampling/logs/"
+    prefix = "./logs/"
     approx_model_name = os.path.basename(approx_model_name)
     target_model_name = os.path.basename(target_model_name)
+
 
     for i in range(len(length_interval)):
         u = length_interval[i]
@@ -213,6 +222,7 @@ def evaluate(approx_model_name, target_model_name,
         print('total_input_tokens', total_input_tokens)
 
         # large model github implementation
+        time.sleep(100)
         total_time = 0
         total_token = 0
         approx_time = 0
@@ -247,6 +257,7 @@ def evaluate(approx_model_name, target_model_name,
         fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_large_model.pkl")
         power_total = get_total_power(outputs, t1, t2, fname)
 
+        print(t1, t2)
 
         print(f'\nlarge model total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}', file=log_f)
         print(f'\nlarge model total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}')
@@ -260,6 +271,7 @@ def evaluate(approx_model_name, target_model_name,
 
 
         # small model github implementation
+        """
         total_time = 0
         total_token = 0
         approx_time = 0
@@ -305,8 +317,8 @@ def evaluate(approx_model_name, target_model_name,
         print(f'total power consumption: {power_total}', file=log_f)
         print(f'power/token: {power_total/total_token}')
         print(f'power/token: {power_total/total_token}', file=log_f)
-
-
+        """
+  
         """ 
         # large model beam sample 
         total_time = 0
@@ -347,6 +359,7 @@ def evaluate(approx_model_name, target_model_name,
         print(f'bleu score = {bleu_score}', file=log_f)
         """        
         # convetional speculative decoding
+        time.sleep(100)
         total_time = 0
         total_token = 0
         approx_time = 0
@@ -362,6 +375,7 @@ def evaluate(approx_model_name, target_model_name,
         cnt = 0
         P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
         t1 = time.time()
+        
 
         #print(tokenizer.eos_token_id)
         #print(tokenizer.pad_token_id)
@@ -403,6 +417,7 @@ def evaluate(approx_model_name, target_model_name,
         fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_ss.pkl")
         power_total = get_total_power(outputs, t1, t2, fname)
 
+        print(t1, t2)
         print(f'\n google speculative decoding (with KVCache) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
         print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
         print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}", file=log_f)
@@ -420,7 +435,7 @@ def evaluate(approx_model_name, target_model_name,
         print(f'total power consumption: {power_total}', file=log_f)
         print(f'power/token: {power_total/total_token}')
         print(f'power/token: {power_total/total_token}', file=log_f)
-
+        
 
         
         # BiLD speculative decoding
@@ -428,6 +443,7 @@ def evaluate(approx_model_name, target_model_name,
         #    for rollback_thres in range(1,10):
         if True:
             for fallback_thres, rollback_thres in BiLD_params:
+                time.sleep(100)
                 total_time = 0
                 total_token = 0
                 approx_time = 0
@@ -482,6 +498,7 @@ def evaluate(approx_model_name, target_model_name,
                 fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_BiLD_{fallback_thres}_{rollback_thres}.pkl")
 
                 power_total = get_total_power(outputs, t1, t2, fname)
+                print(t1, t2)
 
                 print(f'\n BiLD decoding {(fallback_thres, rollback_thres)} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
@@ -509,10 +526,11 @@ def evaluate(approx_model_name, target_model_name,
         #for gamma in [2,4,6,8]:
         #    for width in [2,4,6,8]:
         if True:
-            for gamma, width in multi_params:
-                num_beams = width
+            for gamma, width, num_beams in multi_params:
+#                num_beams = width
                 if gamma * width > 32:
                     break
+                time.sleep(100)
                 total_time = 0
                 total_token = 0
                 approx_time = 0
@@ -567,13 +585,14 @@ def evaluate(approx_model_name, target_model_name,
                 fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_true_beam_{gamma}_{width}.pkl")
                 power_total = get_total_power(outputs, t1, t2, fname)
 
+                print(t1, t2)
 
-                print(f'\n true beam speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
+                print(f'\n true beam speculative decoding (gamma {gamma}, width {width}, num beams {num_beams}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}", file=log_f)
                 print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}", file=log_f)       
         
-                print(f'\n true beam speculative decoding (with KVCache) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
+                print(f'\n true beam speculative decoding (gamma {gamma}, width {width}, num beams {num_beams}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}")
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}")
                 print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")  
@@ -593,9 +612,9 @@ def evaluate(approx_model_name, target_model_name,
         # beam speculative decoding
 #        for gamma in [2,4,6,8]:
 #            for width in [2,4,6,8]:
-        if True:
-            for gamma, width in multi_params:
-                num_beams = num_beams
+        if False:
+            for gamma, width in iid_params:
+                num_beams = width
                 if gamma * width > 32:
                     break
  
@@ -679,11 +698,13 @@ def evaluate(approx_model_name, target_model_name,
 #        for gamma in [2,4,6,8]:
 #            for width in [2,4,6,8]:
         if True:
-            for gamma, width in multi_params:
+
+            for gamma, width in iid_params:
 
                 if gamma * width > 32:
                     break
  
+                time.sleep(100)
                 total_time = 0
                 total_token = 0
                 approx_time = 0
@@ -740,6 +761,7 @@ def evaluate(approx_model_name, target_model_name,
                 fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_iid_{gamma}_{width}.pkl")
                 power_total = get_total_power(outputs, t1, t2, fname)
 
+                print(t1, t2)
 
                 print(f'\niid speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
