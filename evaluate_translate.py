@@ -1,5 +1,5 @@
 import os
-#os.environ['CUDA_VISIBLE_DEVICES'] = '5,7'
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,6'
 os.environ['CURL_CA_BUNDLE'] = ''
 
 import torch
@@ -23,7 +23,7 @@ import numpy as np
 import random
 import subprocess
 import pickle
-from pyJoules.energy_meter import measure_energy
+#from pyJoules.energy_meter import measure_energy
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='args for main.py')
@@ -92,7 +92,7 @@ def get_total_power(outputs, t1, t2, fname):
     return total_power
 
 
-@measure_energy
+#@measure_energy
 def evaluate(approx_model_name, target_model_name, 
         dataset_name, 
         acc_rate_head_path = None, num_tokens=20, 
@@ -171,7 +171,7 @@ def evaluate(approx_model_name, target_model_name,
             prefix = 'translate English to German: '
             postfix = ''
             BiLD_params = [(0.2,2), (0.3,1)]
-            multi_params = [(2,2), (4,2)]
+            multi_params = [(4,2)]
         elif 'opt' in approx_model_name:
             #prefix = 'English: ' 
             #postfix = '\nGerman: '
@@ -181,7 +181,7 @@ def evaluate(approx_model_name, target_model_name,
 #            multi_params = [(4,4), (6,4), (4,6)]
             BiLD_params = [(0.2,2)]
 #            multi_params = [(4,1,8),(4,2,8), (4,4,8), (4,8,8), (6,1,8), (6,2,8), (6,4,8)]
-            multi_params = [(4,2,2)]
+            multi_params = [(4,2)]
             iid_params = [(6,4)]
         elif 'AWQ' in approx_model_name:
             prefix = "[INST] <<SYS>> Please translate the English into German <</SYS>>"
@@ -218,7 +218,7 @@ def evaluate(approx_model_name, target_model_name,
         else:
             l = 0
         ds = [pt for pt in input_dataset if (pt.size(-1) < u and pt.size(-1) >= l)]
-#        ds = ds[:20]
+        ds = ds[:100]
         print(f'input length {l}-{u}, {len(ds)} data in total')
         total_input_tokens = sum([d.size(1) for d in ds])
         print('total_input_tokens', total_input_tokens)
@@ -321,7 +321,7 @@ def evaluate(approx_model_name, target_model_name,
         print(f'power/token: {power_total/total_token}', file=log_f)
         """
   
-        """ 
+         
         # large model beam sample 
         total_time = 0
         total_token = 0
@@ -335,7 +335,7 @@ def evaluate(approx_model_name, target_model_name,
             input_ids = input_ids.to(torch_device)
             t = process_time_ns()
             output = large_model.generate(input_ids, max_new_tokens = num_tokens, num_return_sequences=1, do_sample=True, top_k=top_k, top_p=top_p,
-                    num_beams = 4,
+                    num_beams = 2,
                     pad_token_id=tokenizer.eos_token_id)
             #autoregressive_sampling(input_ids, large_model, num_tokens, top_k = top_k, top_p=top_p)
             total_time += process_time_ns() - t
@@ -354,12 +354,12 @@ def evaluate(approx_model_name, target_model_name,
             pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
 
 
-        print(f'\nlarge model beam sample width {4} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}', file=log_f)
-        print(f'\nlarge model beam sample width {4} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}')
-        bleu_score = bleu.compute(predictions = pred_seq, references = output_dataset)
-        print(f'bleu score = {bleu_score}')
-        print(f'bleu score = {bleu_score}', file=log_f)
-        """        
+        print(f'\nlarge model beam sample width {2} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}', file=log_f)
+        print(f'\nlarge model beam sample width {2} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}')
+        #bleu_score = bleu.compute(predictions = pred_seq, references = output_dataset)
+        #print(f'bleu score = {bleu_score}')
+        #print(f'bleu score = {bleu_score}', file=log_f)
+                
         # convetional speculative decoding
         time.sleep(100)
         total_time = 0
@@ -524,11 +524,11 @@ def evaluate(approx_model_name, target_model_name,
                 #break
            # break
         if True:
-            for gamma, width, num_beams in multi_params:
-                assert width == num_beams
+            for gamma, width in multi_params:
+                num_beams = width
 #                num_beams = width
-                if gamma * width > 32:
-                    break
+#                if gamma * width > 32:
+#                    break
                 time.sleep(100)
                 total_time = 0
                 total_token = 0
@@ -572,6 +572,11 @@ def evaluate(approx_model_name, target_model_name,
                     target_times += details['target_call_times']
                     approx_times += details['approx_call_times']
                     score = get_score(output, large_model, input_ids.size(1))
+                    if score.isnan().any():
+                        print(input_ids)
+                        print(output)
+                        print(tokenizer.eos_token_id)
+                        xxx = input()
                     scores.append(score.item())
                     pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
                     if total_time / 1e9 > max_seconds:
@@ -608,10 +613,10 @@ def evaluate(approx_model_name, target_model_name,
 
 
 
-        # true beam speculative decoding
+        # mjsd speculative decoding
         #for gamma in [2,4,6,8]:
         #    for width in [2,4,6,8]:
-        if False:
+        if True:
             for gamma, width in multi_params:
                 num_beams = width
                 if gamma * width > 32:
@@ -672,12 +677,12 @@ def evaluate(approx_model_name, target_model_name,
 
                 print(t1, t2)
 
-                print(f'\n true beam speculative decoding (gamma {gamma}, width {width}, num beams {num_beams}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
+                print(f'\n mjsd speculative decoding (gamma {gamma}, width {width}, num beams {num_beams}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}", file=log_f)
                 print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}", file=log_f)       
         
-                print(f'\n true beam speculative decoding (gamma {gamma}, width {width}, num beams {num_beams}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
+                print(f'\n mjsd speculative decoding (gamma {gamma}, width {width}, num beams {num_beams}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}")
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}")
                 print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")  
