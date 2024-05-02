@@ -249,6 +249,8 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                     r = torch.rand(1, device = p.device)-1e-5
                     #p_scores = q_scores
                     accept = (p_scores/(q_scores+1e-5)) > r
+#                    if i == inc_len - 1:
+#                        accept[:] = False
                     """
                     if torch.logical_not(accept).any():
                         print('wait')
@@ -411,8 +413,15 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                 target_model_cache.rollback(n+1, choice)
 
 
-            last_beam = max_l - 1
-            approx_model_cache.beam_rollback(last_beam, choice%num_beams)
+            if max_l == inc_len:
+                last_beam_idx = all_beam_idx[-1] 
+#                print(all_beam_idx)
+#                print(choice)
+#                print(last_beam_idx[choice%num_beams])
+#                xxx = input()
+                approx_model_cache.beam_rollback(max_l, last_beam_idx[choice%num_beams])
+            else:
+                approx_model_cache.beam_rollback(max_l, choice%num_beams)
 
             cur_valid_beam = torch.ones_like(all_beam_idx[0]).bool()
 
@@ -577,6 +586,7 @@ def mjsd_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
             target_call_times += 1
             p = target_model_cache._prob_history
             target_time += process_time_ns() - tt
+
 
             for w in range(width):
                 cur_target_p = 0
