@@ -1,4 +1,5 @@
 import torch
+import os
 from typing import Optional
 
 from sampling.utils import norm_logits, sample
@@ -27,14 +28,19 @@ class KVCacheModel():
         self._top_k = top_k
         self._top_p = top_p
 
+    def reset_cache(self):
+        self._past_key_values = None
+        self._prob_history = None
+
     def _forward_with_kvcache(self, input_ids : torch.Tensor, use_debug = False,
             attention_mask = None,
-            decoder_input_ids = None) -> torch.Tensor:
+            decoder_input_ids = None,
+            copy_cache_index = None) -> torch.Tensor:
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
 
         if self._past_key_values is None:
-            assert self._prob_history is None, f"{self._prob_history.shape}"
+            #assert self._prob_history is None, f"{self._prob_history.shape}"
             # the first forward (prefill) returns the prompt's logits
             if self._model.config.is_encoder_decoder == False:
 #                outputs = self._model(input_ids, attention_mask=attention_mask)
@@ -43,7 +49,7 @@ class KVCacheModel():
             else:
 #                outputs = self._model(input_ids, decoder_input_ids = decoder_input_ids, use_cache=True, decoder_attention_mask = attention_mask)
                 #print(input_ids.size(), decoder_input_ids.size())
-                outputs = self._model(input_ids, decoder_input_ids = decoder_input_ids, use_cache=True)
+                outputs = self._model(input_ids, decoder_input_ids = decoder_input_ids)
 
             self._prob_history = outputs.logits
             for i in range(self._prob_history.shape[-2]):   
@@ -58,14 +64,27 @@ class KVCacheModel():
                 break #added by zongyue
 
             num_beams = input_ids.size(0)
-            if self._past_key_values[0][0].size(0) == 1 and num_beams > 1: # handle batch input with single past_key_values
-                past_key_values = []
-                for values in self._past_key_values:
-                    repeat_values = []
-                    for val in values:
-                        repeat_values.append(val.repeat(num_beams, 1, 1, 1))
-                    past_key_values.append(tuple(repeat_values))
-                self._past_key_values = past_key_values
+#            if self._past_key_values[0][0].size(0) == 1 and num_beams > 1: # handle batch input with single past_key_values
+            if self._past_key_values[0][0].size(0) < num_beams:
+                #TODO handle multiple beams, need to record the beams each input correspond to
+                if copy_cache_index is None:
+                    repeats = int(num_beams/self._past_key_values[0][0].size(0))
+                    past_key_values = []
+                    for values in self._past_key_values:
+                        repeat_values = []
+                        for val in values:
+                            repeat_values.append(val.repeat(num_beams, 1, 1, 1))
+                        past_key_values.append(tuple(repeat_values))
+                    self._past_key_values = past_key_values
+                else:
+                    past_key_values = []
+                    for values in self._past_key_values:
+                        repeat_values = []
+                        for val in values:
+                            repeat_values.append(val[copy_cache_index])
+                        past_key_values.append(tuple(repeat_values))
+                    self._past_key_values = past_key_values
+
                
             if self._model.config.is_encoder_decoder == False:
                 last_input_id = input_ids[:, cached_len:]
@@ -101,8 +120,13 @@ class KVCacheModel():
             for i in range(not_cached_q.shape[-2]):   
                 not_cached_q[:, i, :] = norm_logits(not_cached_q[:, i, :], self._temperature, self._top_k, self._top_p)    
                 
-            if self._prob_history.size(0) == 1 and num_beams > 1:
-                self._prob_history = self._prob_history.repeat(num_beams, 1, 1)
+#            if self._prob_history.size(0) == 1 and num_beams > 1:
+            if self._prob_history.size(0) < num_beams:
+                if copy_cache_index is None:
+                    repeats = int(num_beams/self._prob_history.size(0))
+                    self._prob_history = self._prob_history.repeat(repeats, 1, 1)
+                else:
+                    self._prob_history = self._prob_history[copy_cache_index]
 
             self._prob_history = torch.cat([self._prob_history, not_cached_q], dim=1)
             
@@ -118,6 +142,7 @@ class KVCacheModel():
                                     multi: int = 1,
                                     strategy: str = "beam",
                                     attention_mask = None,
+                                    copy_cache_index = None,
                                     use_debug = False) -> torch.Tensor:
         """ forward the model gamma times
 
@@ -136,7 +161,8 @@ class KVCacheModel():
 
 
         for _ in range(gamma):
-            q = self._forward_with_kvcache(x, use_debug, decoder_input_ids = decoder_input_ids, attention_mask = attention_mask)
+            q = self._forward_with_kvcache(x, use_debug, decoder_input_ids = decoder_input_ids, 
+                    attention_mask = attention_mask, copy_cache_index = copy_cache_index)
             if multi == 1:
                 next_tok = sample(q)
             else:
@@ -159,18 +185,28 @@ class KVCacheModel():
     def generate(self, input : torch.Tensor, gamma : int,
                  decoder_input_ids = None,
                  attention_mask = None,
+                 copy_cache_index = None,
                  multi: int = 1, strategy: str = "beam") -> torch.Tensor:
         if self._model.config.is_encoder_decoder == True and decoder_input_ids is None:
             raise RuntimeError("It is an encoder-decoder model, please set decoder_input_ids")
-        output = self._generate_with_kvcache(input, gamma, decoder_input_ids = decoder_input_ids, multi=multi, strategy=strategy, attention_mask = attention_mask)
+        output = self._generate_with_kvcache(input, gamma, decoder_input_ids = decoder_input_ids, multi=multi, strategy=strategy, 
+                attention_mask = attention_mask, copy_cache_index = copy_cache_index)
         return output
 
     @torch.no_grad()
     def beam_rollback(self, beam_idx, choice):
+
+#        print(len(self.beam_past_key_values))
+#        assert len(self.beam_past_key_values) == 4
 #        print(beam_idx)
 #        print(len(self.beam_past_key_values))
+        if beam_idx == -1 or True:
+            self._past_key_values = None
+            return
+        if beam_idx >= len(self.beam_past_key_values):
+            print(beam_idx, len(self.beam_past_key_values))
         self._past_key_values = self.beam_past_key_values[beam_idx]
-        self.rollback(-1, choice)
+        self.rollback(-2, choice)
 
     @torch.no_grad()
     def rollback(self, end_pos : int, choice=None):
@@ -201,8 +237,12 @@ class KVCacheModel():
                         raise NotImplementedError
                     else:
                         # k, v (batch, head, seq, hidden_dim)
-                        k = k[choice:choice+1, :, :end_pos, :]
-                        v = v[choice:choice+1, :, :end_pos, :]
+                        if isinstance(choice, int):
+                            k = k[choice:choice+1, :, :end_pos, :]
+                            v = v[choice:choice+1, :, :end_pos, :]
+                        else:
+                            k = k[choice, :, :end_pos, :]
+                            v = v[choice, :, :end_pos, :]
                         kv_trimmed = (k, v)
                         past_key_values_trimmed.append(kv_trimmed)
         else:
@@ -213,7 +253,11 @@ class KVCacheModel():
                         if choice is None:
                             trimmed_values.append(val)
                         else:
-                            val = val[choice:choice+1, :, :, :]
+                            if isinstance(choice, int):
+                                val = val[choice:choice+1, :, :, :]
+                            else:
+                                val = val[choice, :, :, :]
+
                             trimmed_values.append(val)
 
                     else:
@@ -221,7 +265,11 @@ class KVCacheModel():
                             val = val[:, :, :end_pos, :]
                             trimmed_values.append(val)
                         else:
-                            val = val[choice:choice+1, :, :end_pos, :]
+                            if isinstance(choice, int):
+                                val = val[choice:choice+1, :, :end_pos, :]
+                            else:
+                                val = val[choice, :, :end_pos, :]
+
                             trimmed_values.append(val)
                 past_key_values_trimmed.append(tuple(trimmed_values))
         
@@ -230,7 +278,11 @@ class KVCacheModel():
             if choice is None:
                 self._prob_history = self._prob_history[:, :end_pos, :]
             else:
-                self._prob_history = self._prob_history[choice:choice+1, :end_pos, :]
+                if isinstance(choice, int):
+                    self._prob_history = self._prob_history[choice:choice+1, :end_pos, :]
+                else:
+                    self._prob_history = self._prob_history[choice, :end_pos, :]
+
 
     @torch.no_grad()
     def beam_sample_with_kv_cache(
@@ -302,22 +354,33 @@ class KVCacheModel():
                max_length=generation_config.max_length)
 
         # 13. interleave input_ids with `num_beams` additional sequences per batch
-        input_ids, model_kwargs = self._model._expand_inputs_for_generation(
+        if prefix.size(0) == 1:
+            #TODO check this
+            input_ids, model_kwargs = self._model._expand_inputs_for_generation(
                                         input_ids=prefix,
                                         expand_size=generation_config.num_beams,
                                         is_encoder_decoder=self._model.config.is_encoder_decoder,
                                         **model_kwargs
                                    )
+            past_key_values = []
+            if self._past_key_values is not None:
+                for values in self._past_key_values:
+                    repeat_values = []
+                    for val in values:
+                        repeat_values.append(val.repeat(num_beams, 1, 1, 1))
+                    past_key_values.append(tuple(repeat_values))
+                self._past_key_values = past_key_values
 
-        # interleave kv cache
-        past_key_values = []
-        if self._past_key_values is not None:
-            for values in self._past_key_values:
-                repeat_values = []
-                for val in values:
-                    repeat_values.append(val.repeat(num_beams, 1, 1, 1))
-                past_key_values.append(tuple(repeat_values))
-            self._past_key_values = past_key_values
+        else:
+            input_ids, model_kwargs = self._model._expand_inputs_for_generation(
+                                        input_ids=prefix,
+                                        expand_size=1,
+                                        is_encoder_decoder=self._model.config.is_encoder_decoder,
+                                        **model_kwargs
+                                   )
+
+
+            # interleave kv cache
 
 
         # call beam_sample with kv cache
@@ -425,6 +488,11 @@ class KVCacheModel():
         all_beam_indices = []
         all_next_tokens = []
         all_beam_scores = []
+        all_input_indices = []
+        input_index = torch.arange(num_beams, dtype=torch.long, device=input_ids.device)
+        all_input_indices.append(input_index)
+
+
 
         while True:
             if synced_gpus:
@@ -438,23 +506,36 @@ class KVCacheModel():
                     break
 
 
-            if self._past_key_values is None:
+            if self._past_key_values is None: #or True:
                 model_inputs = self._model.prepare_inputs_for_generation(input_ids, **model_kwargs)
+                try:
 
-                outputs = self._model(
-                    **model_inputs,
-                    return_dict=True,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                )
+                    outputs = self._model(
+                      **model_inputs,
+                      return_dict=True,
+                      output_attentions=output_attentions,
+                      output_hidden_states=output_hidden_states,
+                    )
+                except Exception as e:
+                    print(model_kwargs)
+                    print(input_ids.size())
+                    #print(model_inputs)
+                    #print(model_inputs.keys())
+                    for k,v in model_inputs['encoder_outputs'].items():
+                        if isinstance(v, torch.Tensor):
+                            print(k)
+                            print(v.size())
+                    xxx = input('error')
+                    print(e)
+                    os._exit(0)
+
+
 
             else:
                 model_kwargs["past_key_values"] = self._past_key_values
                 model_inputs = self._model.prepare_inputs_for_generation(input_ids, 
-#                    past_key_values=self._past_key_values, 
                     use_cache=True,
                     **model_kwargs)
- 
                 
                 assert model_inputs['use_cache'] == True
 
@@ -463,8 +544,8 @@ class KVCacheModel():
                     return_dict=True,
                     output_attentions=output_attentions,
                     output_hidden_states=output_hidden_states,
-                    #past_key_values=self._past_key_values, 
                 )
+
 
             if synced_gpus and this_peer_finished:
                 cur_len = cur_len + 1
@@ -475,16 +556,17 @@ class KVCacheModel():
             next_token_scores = nn.functional.log_softmax(
                 next_token_logits, dim=-1
             )  # (batch_size * num_beams, vocab_size)
+            tmp = next_token_scores
             #print('sdaf')
             #print(next_token_scores.isinf().any())
             #print(next_token_scores.isnan().any())
             #print(beam_scores.isinf().any())
 
             next_token_scores_processed = logits_processor(input_ids, next_token_scores)
-            next_token_scores_processed = logits_warper(input_ids, next_token_scores_processed)
             next_token_scores = next_token_scores_processed + beam_scores[:, None].expand_as(
                 next_token_scores_processed
             )
+            next_token_scores = logits_warper(input_ids, next_token_scores)
             #print('sdfasdfsdfa')
             #print(next_token_scores.isinf().any())
             
@@ -521,7 +603,19 @@ class KVCacheModel():
             
             #  add alternative sort criterion based on predicted acceptance rate
             next_tokens = torch.multinomial(probs, num_samples=2 * num_beams)
+            #print('next token')
+            #print(next_tokens)
             next_token_scores = torch.gather(next_token_scores, -1, next_tokens)
+            """
+            if (next_token_scores==0).any():
+                print('sample 0')
+                print(next_token_scores)
+                print(probs.nonzero().numel(), 2*num_beams)
+                print(next_token_scores_processed.nonzero().numel())
+                print(beam_scores)
+                print(tmp.nonzero().numel())
+                #xxx = input()
+            """
             next_token_scores, _indices = torch.sort(next_token_scores, descending=True, dim=1)
             next_tokens = torch.gather(next_tokens, -1, _indices)
 
@@ -550,9 +644,22 @@ class KVCacheModel():
                 all_next_tokens.append(beam_next_tokens)
                 sample_id = beam_idx * vocab_size + beam_next_tokens
                 sample_id = sample_id.view(batch_size, -1)
-                sample_prob = torch.gather(probs, -1, sample_id).view(-1)
-                all_beam_scores.append(sample_prob)
+                #print(probs.sum(),probs.max())
+                #print(probs.nonzero())
+                #print('sample id')
+                #print(sample_id)
+                #print('divide next tokens')
+                #print(next_tokens)
+                #print('beam next tokens')
+                #print(beam_next_tokens)
 
+                sample_prob = torch.gather(probs, -1, sample_id).view(-1)
+                #print(next_token_scores)
+                #print(sample_prob)
+                #print(beam_scores)
+                all_beam_scores.append(sample_prob)
+                input_index = input_index[beam_idx]
+                all_input_indices.append(input_index)
                 
             input_ids = torch.cat([input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)], dim=-1)
 
@@ -560,12 +667,16 @@ class KVCacheModel():
                 outputs, model_kwargs, is_encoder_decoder=self._model.config.is_encoder_decoder
             )
             if model_kwargs["past_key_values"] is not None:
+                if len(self.beam_past_key_values)==0 and False:
+                    #TODO this seems slow down the inference process
+                    self.beam_past_key_values.append(model_kwargs["past_key_values"])
+
                 model_kwargs["past_key_values"] = self._model._reorder_cache(model_kwargs["past_key_values"], beam_idx)
                 if return_intermediate_results == False:
                     self._past_key_values = model_kwargs["past_key_values"]
-                else:
-                    self.beam_past_key_values.append(model_kwargs["past_key_values"])
-                    pass
+
+            else:
+                print('past key values is none')
 
             if scores is not None:
                 scores = torch.cat([scores, nn.functional.softmax(next_token_scores_processed, dim=-1)[:,None, :]], dim=1)
@@ -665,7 +776,8 @@ class KVCacheModel():
                   all_intermediate_beams,
                   all_beam_indices,
                   all_next_tokens,
-                  all_beam_scores)
+                  all_beam_scores,
+                  all_input_indices)
 
 
                 else:
@@ -680,7 +792,8 @@ class KVCacheModel():
                   all_intermediate_beams,
                   all_beam_indices,
                   all_next_tokens,
-                  all_beam_scores)
+                  all_beam_scores,
+                  all_input_indices)
 
         else:
             return sequence_outputs["sequences"]

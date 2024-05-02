@@ -23,6 +23,7 @@ import numpy as np
 import random
 import subprocess
 import pickle
+#from pyJoules.energy_meter import measure_energy
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='args for main.py')
@@ -95,6 +96,7 @@ def get_total_power(outputs, t1, t2, fname):
     return total_power
 
 
+#@measure_energy
 def evaluate(approx_model_name, target_model_name, 
         dataset_name, 
         acc_rate_head_path = None, num_tokens=20, 
@@ -138,6 +140,7 @@ def evaluate(approx_model_name, target_model_name,
                                                        torch_dtype=torch.float16,
                                                        device_map="auto",
                                                        trust_remote_code=True)
+            tokenizer.pad_token_id = tokenizer.eos_token_id
 
     if 't5' in target_model_name:
         large_model = AutoModelForSeq2SeqLM.from_pretrained(target_model_name, 
@@ -150,13 +153,18 @@ def evaluate(approx_model_name, target_model_name,
                                                        trust_remote_code=True)
         large_model.generation_config.pad_token_id = tokenizer.eos_token_id
 
+    elif 'AWQ' in target_model_name:
+        large_model = AutoModelForCausalLM.from_pretrained(target_model_name, 
+                                         #fuse_layers=True,
+                                         trust_remote_code=True, 
+                                         #safetensors=True,
+                                         device_map="auto")
     else:
         large_model = AutoModelForCausalLM.from_pretrained(target_model_name, 
                                                        torch_dtype=torch.float16,
                                                        device_map="auto",
+                                                       offload_folder="offload",
                                                        trust_remote_code=True)
-
-
     top_k = 20
     top_p = 0.9
     repeats = 10
@@ -168,19 +176,16 @@ def evaluate(approx_model_name, target_model_name,
             prefix = 'translate English to German: '
             postfix = ''
             BiLD_params = [(0.3, 1)]
-#            multi_params = [(2,1,8), (2,2,8), (2,4,8), (2,6,8), (2,8,8),(2,2,2), (2,2,4), (2,2,8), (2,2,16),(2,2,32)]
-            multi_params = [(6,2,8)]
+            multi_params = [(6,2),(4,2)]
             iid_params = [(6,2)]
         elif 'opt' in approx_model_name:
             #prefix = 'English: ' 
             #postfix = '\nGerman: '
             prefix = 'Please translate the input into German. \nInput:'
             postfix = '\nGerman Translation: '
-#            multi_params = [(4,4), (6,4), (4,6)]
             BiLD_params = [(0.2,2)]
-#            multi_params = [(2,1,8), (2,2,8), (2,4,8), (2,6,8), (2,8,8),(2,2,2), (2,2,4), (2,2,8), (2,2,16),(2,2,32)]
-            multi_params = [(4,6,8)]
-            iid_params = [(4,6)]
+            multi_params = [(4,2),(6,2)]
+            iid_params = [(4,6),(4,8)]
 
         elif 'GPTQ' in approx_model_name:
             prefix = "[INST] <<SYS>> Please translate the English into German <</SYS>>"
@@ -213,6 +218,7 @@ def evaluate(approx_model_name, target_model_name,
     approx_model_name = os.path.basename(approx_model_name)
     target_model_name = os.path.basename(target_model_name)
 
+
     for i in range(len(length_interval)):
         u = length_interval[i]
         if i > 0:
@@ -220,7 +226,7 @@ def evaluate(approx_model_name, target_model_name,
         else:
             l = 0
         ds = [pt for pt in input_dataset if (pt.size(-1) < u and pt.size(-1) >= l)]
-        ds = ds[:20]
+#        ds = ds[:100]
         print(f'input length {l}-{u}, {len(ds)} data in total')
         total_input_tokens = sum([d.size(1) for d in ds])
         print('total_input_tokens', total_input_tokens)
@@ -228,6 +234,7 @@ def evaluate(approx_model_name, target_model_name,
         large_model_cnt = 0
         
         # large model github implementation
+        time.sleep(100)
         total_time = 0
         total_token = 0
         approx_time = 0
@@ -240,8 +247,8 @@ def evaluate(approx_model_name, target_model_name,
         t1 = time.time()
         for input_ids in tqdm(ds):
             large_model_cnt += 1
-            if large_model_cnt % 4 == 0:
-                time.wait(0.025)
+            #if large_model_cnt % 4 == 0:
+            #    time.sleep(0.025)
 
             input_ids = input_ids.to(torch_device)
             t = process_time_ns()
@@ -263,6 +270,7 @@ def evaluate(approx_model_name, target_model_name,
         fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_large_model.pkl")
         power_total = get_total_power(outputs, t1, t2, fname)
 
+        print(t1, t2)
 
         print(f'\nlarge model total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}', file=log_f)
         print(f'\nlarge model total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}')
@@ -279,6 +287,7 @@ def evaluate(approx_model_name, target_model_name,
 
 
         # small model github implementation
+        """
         total_time = 0
         total_token = 0
         approx_time = 0
@@ -328,48 +337,47 @@ def evaluate(approx_model_name, target_model_name,
         print(f'power/token: {power_total/total_token}')
         print(f'power/token: {power_total/total_token}', file=log_f)
         
-
         """ 
         # large model beam sample 
-        total_time = 0
-        total_token = 0
-        approx_time = 0
-        target_time = 0
-        other_time = 0
-        target_times = 0
-        scores = []
-        pred_seq = []
-        for input_ids in tqdm(ds):
-            input_ids = input_ids.to(torch_device)
-            t = process_time_ns()
-            output = large_model.generate(input_ids, max_new_tokens = num_tokens, num_return_sequences=1, do_sample=True, top_k=top_k, top_p=top_p,
-                    num_beams = 4,
+        for num_beams in [2,4,8,16]:
+            total_time = 0
+            total_token = 0
+            approx_time = 0
+            target_time = 0
+            other_time = 0
+            target_times = 0
+            cnt = 0
+            scores = []
+            pred_seq = []
+            for input_ids in tqdm(ds):
+                cnt += 1
+                input_ids = input_ids.to(torch_device)
+                t = process_time_ns()
+                output = large_model.generate(input_ids, max_new_tokens = num_tokens, num_return_sequences=1, do_sample=True, top_k=top_k, top_p=top_p,
+                    num_beams = num_beams,
                     pad_token_id=tokenizer.eos_token_id)
             #autoregressive_sampling(input_ids, large_model, num_tokens, top_k = top_k, top_p=top_p)
-            total_time += process_time_ns() - t
+                total_time += process_time_ns() - t
 
-            if large_model.config.is_encoder_decoder == True:
-                output = torch.cat((input_ids, output), dim=-1)
-            total_token += len(output[0]) - input_ids.size(1)
-            score = get_score(output, large_model, input_ids.size(1))
-            if score.isnan().any():
-                print(input_ids.size())
-                print(output)
-                print(output.size())
-                print(score)
-                xxx = input()
-            scores.append(score.item())
-            pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+                if large_model.config.is_encoder_decoder == True:
+                    output = torch.cat((input_ids, output), dim=-1)
+                total_token += len(output[0]) - input_ids.size(1)
+                score = get_score(output, large_model, input_ids.size(1))
+                scores.append(score.item())
+                pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+                if total_time / 1e9 > max_seconds:
+                    print(f'terminated at {cnt}', file=log_f)
+                    print(f'terminated at {cnt}')
+                    break
 
-
-        print(f'\nlarge model beam sample width {4} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}', file=log_f)
-        print(f'\nlarge model beam sample width {4} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}')
-        bleu_score = bleu.compute(predictions = pred_seq, references = output_dataset)
-        print(f'bleu score = {bleu_score}')
-        print(f'bleu score = {bleu_score}', file=log_f)
-        """        
-        
+            print(f'\nlarge model beam sample width {num_beams} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}', file=log_f)
+            print(f'\nlarge model beam sample width {num_beams} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob_score = {np.mean(scores)}')
+        #bleu_score = bleu.compute(predictions = pred_seq, references = output_dataset)
+        #print(f'bleu score = {bleu_score}')
+        #print(f'bleu score = {bleu_score}', file=log_f)
+                
         # convetional speculative decoding
+        time.sleep(100)
         total_time = 0
         total_token = 0
         approx_time = 0
@@ -385,13 +393,14 @@ def evaluate(approx_model_name, target_model_name,
         cnt = 0
         P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
         t1 = time.time()
+        
 
         #print(tokenizer.eos_token_id)
         #print(tokenizer.pad_token_id)
         for input_ids in tqdm(ds):
             cnt += 1
-            if cnt % 16 == 0:
-                time.wait(0.025)
+#            if cnt % 16 == 0:
+#                time.sleep(0.025)
 
 
             input_ids = input_ids.to(torch_device)
@@ -430,6 +439,7 @@ def evaluate(approx_model_name, target_model_name,
         fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_ss.pkl")
         power_total = get_total_power(outputs, t1, t2, fname)
 
+        print(t1, t2)
         print(f'\n google speculative decoding (with KVCache) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
         print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
         print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}", file=log_f)
@@ -447,15 +457,16 @@ def evaluate(approx_model_name, target_model_name,
         print(f'total power consumption: {power_total}', file=log_f)
         print(f'power/token: {power_total/total_token}')
         print(f'power/token: {power_total/total_token}', file=log_f)
-
+        
 
         
         # BiLD speculative decoding
         BiLD_stop = False
         #for fallback_thres in [0.2, 0.3, 0.4,0.5,0.6,0.7,0.8,0.9]:
         #    for rollback_thres in range(1,10):
-        if False:
+        if True:
             for fallback_thres, rollback_thres in BiLD_params:
+                time.sleep(100)
                 total_time = 0
                 total_token = 0
                 approx_time = 0
@@ -474,8 +485,8 @@ def evaluate(approx_model_name, target_model_name,
 
                 for input_ids in tqdm(ds):
                     cnt += 1
-                    if cnt % 16 == 0:
-                        time.wait(0.025)
+                    #if cnt % 16 == 0:
+                    #    time.sleep(0.025)
 
 
                     input_ids = input_ids.to(torch_device)
@@ -513,6 +524,7 @@ def evaluate(approx_model_name, target_model_name,
                 fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_BiLD_{fallback_thres}_{rollback_thres}.pkl")
 
                 power_total = get_total_power(outputs, t1, t2, fname)
+                print(t1, t2)
 
                 print(f'\n BiLD decoding {(fallback_thres, rollback_thres)} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
@@ -545,14 +557,15 @@ def evaluate(approx_model_name, target_model_name,
            # break
         
         # true beam speculative decoding
-#        for gamma in [2,4,6,8]:
-#            for width in [1, 2,4,6,8]:
-        if True:
-            for gamma, width, num_beams in multi_params:
-#                num_beams = max(width, 2)
+        for gamma in [4,6,8]:
+            for width in [2,4,6,8]:
+#        if True:
+#            for gamma, width in multi_params:
+                num_beams = width
+#                num_beams = width
 #                if gamma * width > 32:
 #                    break
-                
+                time.sleep(100)
                 total_time = 0
                 total_token = 0
                 approx_time = 0
@@ -572,8 +585,8 @@ def evaluate(approx_model_name, target_model_name,
 
                 for input_ids in tqdm(ds):
                     cnt += 1
-                    if cnt % 16 == 0:
-                        time.wait(0.025)
+                    #if cnt % 16 == 0:
+                    #    time.sleep(0.025)
 
 
                     input_ids = input_ids.to(torch_device)
@@ -598,6 +611,12 @@ def evaluate(approx_model_name, target_model_name,
                     target_times += details['target_call_times']
                     approx_times += details['approx_call_times']
                     score = get_score(output, large_model, input_ids.size(1))
+                    if score.isnan().any():
+                        print(input_ids)
+                        print(output)
+                        print(tokenizer.eos_token_id)
+                        raise RuntimeError('score nan')
+                    #    xxx = input()
                     scores.append(score.item())
                     pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
                     if total_time / 1e9 > max_seconds:
@@ -634,14 +653,14 @@ def evaluate(approx_model_name, target_model_name,
 
 
 
-        # true beam speculative decoding
+        # mjsd speculative decoding
         #for gamma in [2,4,6,8]:
         #    for width in [2,4,6,8]:
-        if False:
+        if True:
             for gamma, width in multi_params:
                 num_beams = width
-                if gamma * width > 32:
-                    break
+#                if gamma * width > 32:
+#                    break
                 total_time = 0
                 total_token = 0
                 approx_time = 0
@@ -696,13 +715,14 @@ def evaluate(approx_model_name, target_model_name,
                 fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_true_beam_{gamma}_{width}.pkl")
                 power_total = get_total_power(outputs, t1, t2, fname)
 
+                print(t1, t2)
 
-                print(f'\n true beam speculative decoding (gamma {gamma}, width {width}, num_beams {num_beams}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
+                print(f'\n mjsd speculative decoding (gamma {gamma}, width {width}, num beams {num_beams}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}", file=log_f)
                 print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}", file=log_f)       
         
-                print(f'\n true beam speculative decoding (gamma {gamma}, width {width}, num_beams {num_beams}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
+                print(f'\n mjsd speculative decoding (gamma {gamma}, width {width}, num beams {num_beams}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}")
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}")
                 print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")  
@@ -807,12 +827,14 @@ def evaluate(approx_model_name, target_model_name,
         # iid beam speculative decoding
 #        for gamma in [2,4,6,8]:
 #            for width in [2,4,6,8]:
-        if False:
-            for gamma, width in multi_params:
+        if True:
 
-                if gamma * width > 32:
-                    break
+            for gamma, width in iid_params:
+
+              #  if gamma * width > 32:
+              #      break
  
+                time.sleep(100)
                 total_time = 0
                 total_token = 0
                 approx_time = 0
@@ -832,8 +854,8 @@ def evaluate(approx_model_name, target_model_name,
 
                 for input_ids in tqdm(ds):
                     cnt += 1
-                    if cnt % 16 == 0:
-                        time.wait(0.025)
+                    #if cnt % 16 == 0:
+                    #    time.sleep(0.025)
 
 
                     input_ids = input_ids.to(torch_device)
@@ -872,6 +894,7 @@ def evaluate(approx_model_name, target_model_name,
                 fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_iid_{gamma}_{width}.pkl")
                 power_total = get_total_power(outputs, t1, t2, fname)
 
+                print(t1, t2)
 
                 print(f'\niid speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
