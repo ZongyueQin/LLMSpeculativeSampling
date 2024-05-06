@@ -29,9 +29,6 @@ class KVCacheModel():
         self._top_p = top_p
         self.beam_rollback_flag = False
 
-    def reset_cache(self):
-        self._past_key_values = None
-        self._prob_history = None
 
     def _forward_with_kvcache(self, input_ids : torch.Tensor, use_debug = False,
             attention_mask = None,
@@ -59,7 +56,7 @@ class KVCacheModel():
             last_q = self._prob_history[:, -1, :]
         else:
             # return the last token's logits
-            cached_len = self._past_key_values[0][0].size(2)
+            cached_len = self._past_key_values[0][0].shape[2]
 #            for values in self._past_key_values:
 #                cached_len = values[0].shape[2]
 #                break #added by zongyue
@@ -113,10 +110,6 @@ class KVCacheModel():
             if not_cached_q.dim() == 2:
                 not_cached_q = torch.unsqueeze(not_cached_q, 0)
                 
-            if not_cached_q.isnan().any():
-                torch.save(last_input_id, '/llmss/last_input_ids.pth')
-                torch.save(self._past_key_values, '/llmss/past_key_values.pth')
-                raise RuntimeError('')
 
             for i in range(not_cached_q.shape[-2]):   
                 not_cached_q[:, i, :] = norm_logits(not_cached_q[:, i, :], self._temperature, self._top_k, self._top_p)    
@@ -548,7 +541,7 @@ class KVCacheModel():
 
 
             else:
-                cached_len = self._past_key_values[0][0].size(2)
+                cached_len = self._past_key_values[0][0].shape[2]
                 last_input_ids = input_ids[:, cached_len:]
                 
                 

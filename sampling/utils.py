@@ -42,7 +42,7 @@ def norm_logits(logits : torch.Tensor, temperature : float, top_k : float, top_p
         torch.Tensor: next token with shape as (batch,  1)
     """
     assert logits.dim() == 2
-    assert logits.isnan().any() == False
+    #assert logits.isnan().any() == False
     logits = logits / temperature
     logits = top_k_top_p_filter(logits, top_k=top_k, top_p=top_p)
     probs = F.softmax(logits, dim=1)

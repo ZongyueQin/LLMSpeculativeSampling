@@ -226,7 +226,7 @@ def evaluate(approx_model_name, target_model_name,
         else:
             l = 0
         ds = [pt for pt in input_dataset if (pt.size(-1) < u and pt.size(-1) >= l)]
-#        ds = ds[:100]
+        ds = ds[:100]
         print(f'input length {l}-{u}, {len(ds)} data in total')
         total_input_tokens = sum([d.size(1) for d in ds])
         print('total_input_tokens', total_input_tokens)
@@ -338,6 +338,7 @@ def evaluate(approx_model_name, target_model_name,
         print(f'power/token: {power_total/total_token}', file=log_f)
         
         """ 
+        """
         # large model beam sample 
         for num_beams in [2,4,8,16]:
             total_time = 0
@@ -375,9 +376,10 @@ def evaluate(approx_model_name, target_model_name,
         #bleu_score = bleu.compute(predictions = pred_seq, references = output_dataset)
         #print(f'bleu score = {bleu_score}')
         #print(f'bleu score = {bleu_score}', file=log_f)
+        """
                 
         # convetional speculative decoding
-        time.sleep(100)
+        #time.sleep(100)
         total_time = 0
         total_token = 0
         approx_time = 0
@@ -458,13 +460,12 @@ def evaluate(approx_model_name, target_model_name,
         print(f'power/token: {power_total/total_token}')
         print(f'power/token: {power_total/total_token}', file=log_f)
         
-
         
         # BiLD speculative decoding
         BiLD_stop = False
         #for fallback_thres in [0.2, 0.3, 0.4,0.5,0.6,0.7,0.8,0.9]:
         #    for rollback_thres in range(1,10):
-        if True:
+        if False:
             for fallback_thres, rollback_thres in BiLD_params:
                 time.sleep(100)
                 total_time = 0
@@ -565,7 +566,7 @@ def evaluate(approx_model_name, target_model_name,
 #                num_beams = width
 #                if gamma * width > 32:
 #                    break
-                time.sleep(100)
+                #time.sleep(100)
                 total_time = 0
                 total_token = 0
                 approx_time = 0

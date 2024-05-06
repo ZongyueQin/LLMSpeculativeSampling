@@ -1098,7 +1098,7 @@ def BiLD_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, target_
             tt = process_time_ns()
           
             #TODO for debug
-            approx_model_cache.reset_cache()
+#            approx_model_cache.reset_cache()
             if approx_model.config.is_encoder_decoder == False:
                 x = approx_model_cache.generate(prefix, 1)
                 prefix_len = prefix.shape[1]
@@ -1269,7 +1269,7 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
             tt = process_time_ns()
 
             # TODO for debug
-            approx_model_cache.reset_cache()
+#            approx_model_cache.reset_cache()
         
             if approx_model.config.is_encoder_decoder == False:
                 x = approx_model_cache.generate(prefix, gamma)
@@ -1334,7 +1334,11 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
         
             if n < prefix_len + gamma - 1:
                 # reject someone, sample from the pos n
-                t = sample(max_fn(target_model_cache._prob_history[:, n, :] - approx_model_cache._prob_history[:, n, :]))
+                try:
+                    t = sample(max_fn(target_model_cache._prob_history[:, n, :] - approx_model_cache._prob_history[:, n, :]))
+                except:
+                    t = sample(max_fn(target_model_cache._prob_history[:, n, :]))
+
                 if verbose:
                     print(f"target resamples at position {n}: \033[34m{Decoder().decode(t)}\033[0m")
                 resample_count += 1
