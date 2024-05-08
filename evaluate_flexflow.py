@@ -13,8 +13,6 @@ from datasets import load_dataset
 from sampling import autoregressive_sampling, speculative_sampling, speculative_sampling_v2, multi_speculative_sampling, mjsd_speculative_sampling
 from sampling import beam_speculative_sampling
 from sampling import BiLD_sampling
-from sampling import random_width_beam_sampling
-
 from globals import Decoder
 import json
 from time import process_time_ns
@@ -25,6 +23,7 @@ import numpy as np
 import random
 import subprocess
 import pickle
+import flexflow.serve as ff
 #from pyJoules.energy_meter import measure_energy
 
 def parse_arguments():
@@ -125,50 +124,6 @@ def evaluate(approx_model_name, target_model_name,
         return
     Decoder().set_tokenizer(tokenizer)
     
-    print(f"begin loading models: \n {approx_model_name} \n {target_model_name}")
-    if 't5' in approx_model_name:
-        small_model = AutoModelForSeq2SeqLM.from_pretrained(approx_model_name, 
-                                                       torch_dtype=torch.float16,
-                                                       device_map="auto",
-                                                       trust_remote_code=True)
-
-    else:
-        if 'GPTQ' in approx_model_name:
-            small_model = AutoModelForCausalLM.from_pretrained(approx_model_name, 
-                                                       device_map="auto",
-                                                       trust_remote_code=True)
-            small_model.generation_config.pad_token_id = tokenizer.eos_token_id
-
-        else:
-            small_model = AutoModelForCausalLM.from_pretrained(approx_model_name, 
-                                                       torch_dtype=torch.float16,
-                                                       device_map="auto",
-                                                       trust_remote_code=True)
-            tokenizer.pad_token_id = tokenizer.eos_token_id
-
-    if 't5' in target_model_name:
-        large_model = AutoModelForSeq2SeqLM.from_pretrained(target_model_name, 
-                                                       torch_dtype=torch.float16,
-                                                       device_map="auto",
-                                                       trust_remote_code=True)
-    elif 'GPTQ' in target_model_name:
-        large_model = AutoModelForCausalLM.from_pretrained(target_model_name, 
-                                                       device_map="auto",
-                                                       trust_remote_code=True)
-        large_model.generation_config.pad_token_id = tokenizer.eos_token_id
-
-    elif 'AWQ' in target_model_name:
-        large_model = AutoModelForCausalLM.from_pretrained(target_model_name, 
-                                         #fuse_layers=True,
-                                         trust_remote_code=True, 
-                                         #safetensors=True,
-                                         device_map="auto")
-    else:
-        large_model = AutoModelForCausalLM.from_pretrained(target_model_name, 
-                                                       torch_dtype=torch.float16,
-                                                       device_map="auto",
-                                                       offload_folder="offload",
-                                                       trust_remote_code=True)
     top_k = 20
     top_p = 0.9
     repeats = 10
@@ -222,6 +177,27 @@ def evaluate(approx_model_name, target_model_name,
     approx_model_name = os.path.basename(approx_model_name)
     target_model_name = os.path.basename(target_model_name)
 
+    # flexflow: specInfer
+    if run_flexflow: 
+        ff.init(
+            num_gpus=2,
+            memory_per_gpu=19000,
+            zero_copy_memory_per_node=10000,
+            tensor_parallelism_degree=1,
+            pipeline_parallelism_degree=1
+            )
+        ff_llm = ff.LLM("facebook/opt-6.7b")
+        ff_config = ff.GenerationConfig(
+                do_sample=False, temperature=0.9, topp=top_p, topk = top_k
+                )
+        ff_ssm = [ff.SSM("facebook/opt-125m")]
+        ff_ssm[0].compile(ff_config)
+        ff_llm.compile(ff_config, 
+                       max_requests_per_batch=16,
+                       max_seq_length=256,
+                       max_tokens_per_batch = 128,
+                       ssms = ff_ssm)
+
 
     for i in range(len(length_interval)):
         u = length_interval[i]
@@ -230,10 +206,81 @@ def evaluate(approx_model_name, target_model_name,
         else:
             l = 0
         ds = [pt for pt in input_dataset if (pt.size(-1) < u and pt.size(-1) >= l)]
-        ds = ds[:100]
+        #ds = ds[:100]
         print(f'input length {l}-{u}, {len(ds)} data in total')
         total_input_tokens = sum([d.size(1) for d in ds])
         print('total_input_tokens', total_input_tokens)
+
+        if run_flexflow:
+            ff_llm.start_server()
+            total_time = 0
+            total_token = 0
+            approx_time = 0
+            target_time = 0
+            other_time = 0
+            target_times = 0
+            scores = []
+            pred_seq = []
+            cnt = 0
+            P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
+            t1 = time.time()
+        
+            for input_ids in tqdm(ds):
+                cnt += 1
+
+                input_ids = input_ids.to(torch_device)
+                if input_ids.size(0) == 1:
+                    input_ids = input_ids[0]
+             #   xxx = input()
+                input_text = tokenizer.decode(input_ids, skip_special_tokens=True)
+             #   xxx = input()
+             #   print(input_text)
+             #   xxx = input()
+                t = process_time_ns()
+                result = ff_llm.generate(input_text) 
+              #  xxx = input('xxx')
+              #  print(result)
+                result = result[0]
+               # print(result)
+
+                total_time += process_time_ns() - t
+                #print(result.output_text)
+                #xxx = input()
+                #print(result.output_tokens)
+                #xxx = input()
+                output_text = str(result.output_text)
+                output = tokenizer.encode(output_text)
+                #print(output)
+                #xxx = input()
+
+                total_token += len(output) - input_ids.size(0)
+#                score = get_score(output, large_model, input_ids.size(1))
+#                scores.append(score.item())
+                #pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+                if total_time / 1e9 > max_seconds:
+                    print(f'terminated at {cnt}', file=log_f)
+                    print(f'terminated at {cnt}')
+                    break
+
+            t2 = time.time()
+            P.kill()
+            P.wait()
+            outputs = P.stdout.readlines()
+            fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_small_model.pkl")
+            power_total = get_total_power(outputs, t1, t2, fname)
+            ff_llm.stop_server()
+
+            """
+            print(f'\nsmall model (gpu) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}')
+            print(f'\nsmall model (gpu) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token, prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}', file=log_f)
+            bleu_score = bleu.compute(predictions = pred_seq, references = output_dataset[:cnt])
+            print(f'bleu score = {bleu_score}')
+            print(f'bleu score = {bleu_score}', file=log_f)
+            print(f'total power consumption: {power_total}')
+            print(f'total power consumption: {power_total}', file=log_f)
+            print(f'power/token: {power_total/total_token}')
+            print(f'power/token: {power_total/total_token}', file=log_f)
+            """
 
 
         large_model_cnt = 0
@@ -344,74 +391,8 @@ def evaluate(approx_model_name, target_model_name,
         
         """ 
         
-
-        for max_beams in [2,4]:
-            for min_beams in [2,4]:
-                if min_beams > max_beams:
-                    continue
-                total_time = 0
-                total_token = 0
-                approx_time = 0
-                target_time = 0
-                other_time = 0
-                target_times = 0
-                total_acc_len = 0
-                acc_rate = []
-                target_times = 0
-                approx_times = 0
-                scores = []
-                pred_seq = []
-                cnt = 0
-                P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
-                t1 = time.time()
-
-                for input_ids in tqdm(ds):
-                    cnt += 1
-                    #if cnt % 16 == 0:
-                    #    time.sleep(0.025)
-
-
-                    input_ids = input_ids.to(torch_device)
-                    t = process_time_ns()
-            
-                    output = random_width_beam_sampling(input_ids, large_model, num_tokens,
-                        max_num_beams = max_beams, min_num_beams = min_beams,
-                        eos_token_id = tokenizer.eos_token_id, 
-                        top_k = top_k, top_p=top_p, pad_token_id = tokenizer.pad_token_id)
-
-                    total_time += process_time_ns() - t
-                    total_token += len(output[0])- input_ids.size(1)
-                    score = get_score(output, large_model, input_ids.size(1))
-                    scores.append(score.item())
-                    pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
-
-                    if total_time / 1e9 > max_seconds:
-                        print(f'terminated at {cnt}', file=log_f)
-                        print(f'terminated at {cnt}')
-                        break
-
-                t2 = time.time()
-                P.kill()
-                P.wait()
-                outputs = P.stdout.readlines()
-                fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_rwbd_{max_beams}_{min_beams}.pkl")
-
-                power_total = get_total_power(outputs, t1, t2, fname)
-                print(t1, t2)
-
-                print(f'\n rwbd decoding {(max_beams, min_beams)} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
-                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}", file=log_f)       
-        
-                print(f'\n rwbd decoding {(max_beams, min_beams)} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
-                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")  
-
-                print(f'total power consumption: {power_total}')
-                print(f'total power consumption: {power_total}', file=log_f)
-                print(f'power/token: {power_total/total_token}')
-                print(f'power/token: {power_total/total_token}', file=log_f)
-
         # large model beam sample 
-        for num_beams in [2,4]:
+        for num_beams in [2,4,8,16]:
             total_time = 0
             total_token = 0
             approx_time = 0
@@ -426,7 +407,6 @@ def evaluate(approx_model_name, target_model_name,
                 input_ids = input_ids.to(torch_device)
                 t = process_time_ns()
                 output = large_model.generate(input_ids, max_new_tokens = num_tokens, num_return_sequences=1, do_sample=True, top_k=top_k, top_p=top_p,
-                        temperature = 1,
                     num_beams = num_beams,
                     pad_token_id=tokenizer.eos_token_id)
             #autoregressive_sampling(input_ids, large_model, num_tokens, top_k = top_k, top_p=top_p)
@@ -448,7 +428,7 @@ def evaluate(approx_model_name, target_model_name,
         #bleu_score = bleu.compute(predictions = pred_seq, references = output_dataset)
         #print(f'bleu score = {bleu_score}')
         #print(f'bleu score = {bleu_score}', file=log_f)
-       
+        
                 
         # convetional speculative decoding
 #        time.sleep(100)
@@ -537,7 +517,7 @@ def evaluate(approx_model_name, target_model_name,
         BiLD_stop = False
         #for fallback_thres in [0.2, 0.3, 0.4,0.5,0.6,0.7,0.8,0.9]:
         #    for rollback_thres in range(1,10):
-        if False:
+        if True:
             for fallback_thres, rollback_thres in BiLD_params:
 #                time.sleep(100)
                 total_time = 0
@@ -630,8 +610,8 @@ def evaluate(approx_model_name, target_model_name,
            # break
         
         # true beam speculative decoding
-        for width in [2,3,4,6,8]:
-            for gamma in [2,3,4,6,8]:
+        for gamma in [2,3,4,6,8]:
+            for width in [2,3,4,6,8]:
 #        if True:
 #            for gamma, width in multi_params:
                 num_beams = width

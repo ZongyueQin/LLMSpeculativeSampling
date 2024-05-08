@@ -13,7 +13,8 @@ import os
 
 @torch.no_grad()
 def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, target_model : torch.nn.Module, 
-                         eos_token_id, pad_token_id, max_len : int , gamma : int = 4, width : int = 8, num_beams: int = 8,
+                         eos_token_id, pad_token_id, max_len : int , gamma : int = 4, width : int = 8, 
+                         num_beams: int = 8, min_num_beams: int = 2,
                          temperature : float = 1, top_k : int = 0, top_p : float = 0, verbose : bool = False, random_seed : int = None,
                          details : bool = False) -> torch.Tensor:
     #print(prefix)
@@ -271,11 +272,11 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
 
                 #accept[:] = True
                 #p_scores = q_scores
-
-                acc_rate.append(accept.float().mean().item())
+                acc_cnt, acc_r = accept.float().sum().item(), accept.float().mean().item()
+                acc_rate.append(acc_r)
                 #print(accept)
 
-                if accept.any():
+                if acc_cnt >= min_num_beams:
                     # Step 5 update cur_valid_beam
                     cur_valid_beam = accept
                   #  print(p_scores)
@@ -303,7 +304,7 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                 cur_p = cur_p[cur_valid_beam]
                 p_next_token_scores = beam_scores[cur_valid_beam][:,None].expand_as(cur_p) + cur_p.log()
                 #op = p_next_token_scores 
-                p_next_token_scores = torch.softmax(p_next_token_scores.view(-1), dim=0)
+                p_next_token_scores = norm_logits(p_next_token_scores.view(1,-1), temperature = temperature, top_k = top_k, top_p = top_p).squeeze()
 
                 """    
                 mask = p_next_token_scores.isnan().view(op.size(0),op.size(1)) 
@@ -362,7 +363,9 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                 cur_p = cur_p[cur_valid_beam]
                 p_next_token_scores = beam_scores[cur_valid_beam][:,None].expand_as(cur_p) + cur_p.log()
                 op = p_next_token_scores 
-                p_next_token_scores = torch.softmax(p_next_token_scores.view(-1), dim=0)
+                #p_next_token_scores = torch.softmax(p_next_token_scores.view(-1), dim=0)
+                p_next_token_scores = norm_logits(p_next_token_scores.view(1,-1), temperature = temperature, top_k = top_k, top_p = top_p).squeeze()
+
                 """
                 mask = p_next_token_scores.isnan().view(op.size(0),op.size(1)) 
                 print(mask.float().sum())
