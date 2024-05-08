@@ -180,7 +180,7 @@ def evaluate(approx_model_name, target_model_name,
             prefix = 'translate English to German: '
             postfix = ''
             BiLD_params = [(0.3, 1)]
-            multi_params = [(6,2),(4,2)]
+            multi_params = [(6,2,8),(4,2,9)]
             iid_params = [(6,2)]
         elif 'opt' in approx_model_name:
             #prefix = 'English: ' 
@@ -205,8 +205,81 @@ def evaluate(approx_model_name, target_model_name,
             prefix = 'translate English to German: '
             postfix = ''
         input_dataset = [tokenizer.encode(prefix + s['translation']['en'] + postfix, return_tensors="pt") for s in dataset]
-
         output_dataset = [[s['translation']['de']] for s in dataset]
+
+    elif dataset_name == 'cnndm':
+        dataset = load_dataset('cnn_dailymail', '3.0.0', split='test')
+        prefix = 'Summarize: '
+        postfix = ""
+        if 't5' in approx_model_name:
+            BiLD_params = [(0.2, 2)]
+            multi_params = [(2,1,16), (2,1,32)]
+            iid_params = [(4,2)]
+        elif 'opt' in approx_model_name:
+#            BiLD_params = [(0.3, 2), (0.3, 3)]
+            BiLD_params = [(0.3,2)]
+            multi_params = [(2,1,8),(4,1,8)]
+            iid_params = [ (4,2), ]
+        elif 'GPTQ' in approx_model_name:
+            #BiLD_params = [(0.9, 3), (0.9, 2), (0.9,1)]
+            BiLD_params = [(0.9, 3)]
+            #BiLD_params = []
+#            multi_params = [(4,4,8), (4,4,16), (4,8,8), (4,8,16), (6,4,16), (8,4,16)]
+#            multi_params += [(4,4,4), (4,6,6)]
+            multi_params = [(6,4,16)]
+#            iid_params = [(4,4), (6,4), (8,4)]
+            iid_params = [(4,4)]
+            #iid_params  = []
+            prefix = "[INST] <<SYS>> Please Summarize <</SYS>>"
+            postfix = '[/INST]'
+        input_dataset = [tokenizer.encode(prefix + s['article'] + postfix, return_tensors="pt", max_length=512, truncation=True) for s in dataset]
+        output_dataset = [[s['highlights']] for s in dataset]
+    elif dataset_name == 'chatalpaca':
+
+        if 't5' in approx_model_name:
+            prefix = ''
+            postfix = ''
+            BiLD_params = [(0.2,2), (0.3,1)]
+            multi_params = [(2,1,8), (2,2,8), (2,4,8), (2,6,8), (2,8,8),(2,2,2), (2,2,4), (2,2,8), (2,2,16),(2,2,32)]
+            iid_params = [(4,2)]
+        elif 'opt' in approx_model_name:
+            prefix = ''
+            postfix = ''
+            BiLD_params = [(0.2, 2), (0.3, 2), (0.3, 3)]
+            multi_params = [(4,4), (6,4), (4,6)]
+#            multi_params = [(2,1,8), (2,2,8), (2,4,8), (2,6,8), (2,8,8),(2,2,2), (2,2,4), (2,2,8), (2,2,16),(2,2,32)]
+            #multi_params = [(6,1,8), (6,2,8), (6,4,8), (6,6,8), (6,8,8)]
+            iid_params = [(4,2)]
+
+        elif 'GPTQ' in approx_model_name:
+            prefix = ""
+            postfix = ''
+            BiLD_params = [(0.9,1),(0.9,2)]
+#            BiLD_params = []
+            #multi_params = [(8,1,2), (8,2,2), (8,1,8), (8,2,8)]#,(4,6,8),(4,8,8),(6,4,8)]
+            iid_params = [(4,2)]
+        else:
+            prefix = ''
+            postfix = ''
+
+        import json
+        raw_data = []
+        with open('chatalpaca-10k.json', 'r') as f:
+            for line in f:
+                raw_data.append(json.loads(line)) 
+        input_dataset = []
+        output_dataset = []
+        for conver in raw_data:
+            conv_list = conver['conversations']
+            input_text = ""
+            for turn in conv_list:
+                if turn['from'] == 'human':
+                    input_text += turn['value']+'\n'
+                else:
+                    input_dataset.append(input_text)
+                    output_dataset.append(turn['value'])
+                    input_text += turn['value']+'\n'
+
     else:
         raise RuntimeError(f"Unrecognized dataset {dataset_name}")
     # split dataset based on input length
@@ -629,8 +702,11 @@ def evaluate(approx_model_name, target_model_name,
            # break
         
         # true beam speculative decoding
-        for width in [2,3,4,6,8]:
-            for gamma in [2,3,4,6,8]:
+        for width in [2,3,4,6]:
+          for min_width in [1,2,3]:
+            for gamma in [2,3,4,6]:
+                if min_width > width:
+                    continue
 #        if True:
 #            for gamma, width in multi_params:
                 num_beams = width
@@ -653,6 +729,7 @@ def evaluate(approx_model_name, target_model_name,
                 cnt = 0
                 P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
                 t1 = time.time()
+                num_beams_list = []
 
 
                 for input_ids in tqdm(ds):
@@ -667,7 +744,8 @@ def evaluate(approx_model_name, target_model_name,
                     output, details = beam_speculative_sampling(input_ids, small_model, large_model, 
                       eos_token_id = tokenizer.eos_token_id,
                       pad_token_id = tokenizer.pad_token_id, max_len = num_tokens, 
-                      gamma = gamma, width=width, num_beams = num_beams,
+                      gamma = gamma, width=width, 
+                      num_beams = num_beams, min_num_beams = min_width,
                       top_k = top_k, top_p=top_p, 
                       random_seed = random_seed, details=True)
                     #print(output)
@@ -682,6 +760,7 @@ def evaluate(approx_model_name, target_model_name,
                     acc_rate.append(details['acc_rate'])
                     target_times += details['target_call_times']
                     approx_times += details['approx_call_times']
+                    num_beams_list += details['num_beams_list']
                     score = get_score(output, large_model, input_ids.size(1))
                     if score.isnan().any():
                         print(input_ids)
@@ -704,18 +783,18 @@ def evaluate(approx_model_name, target_model_name,
                 power_total = get_total_power(outputs, t1, t2, fname)
 
 
-                print(f'\n true beam speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
+                print(f'\n true beam speculative decoding (gamma {gamma}, width {width}, {min_width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}", file=log_f)
+                print(f"average num beams {np.mean(num_beams_list)}", file=log_f)
                 print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}", file=log_f)       
+
         
-                print(f'\n true beam speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
+                print(f'\n true beam speculative decoding (gamma {gamma}, width {width}, {min_width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}")
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}")
+                print(f"average num beams {np.mean(num_beams_list)}")
                 print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")  
-                bleu_score = bleu.compute(predictions = pred_seq, references = output_dataset[:cnt])
-                print(f'bleu score = {bleu_score}')
-                print(f'bleu score = {bleu_score}', file=log_f)
             #    break
             #break
                 print(f'total power consumption: {power_total}')
@@ -728,9 +807,13 @@ def evaluate(approx_model_name, target_model_name,
         # mjsd speculative decoding
         #for gamma in [2,4,6,8]:
         #    for width in [2,4,6,8]:
-        if True:
-            for gamma, width in multi_params:
-                num_beams = width
+        if False:
+            for params in multi_params:
+                if len(params) == 2:
+                    gamma, width = params[0], params[1]
+                    num_beams = width
+                else:
+                    gamma, width, num_beams = params[0], params[1], params[2]
 #                if gamma * width > 32:
 #                    break
                 total_time = 0
@@ -807,93 +890,6 @@ def evaluate(approx_model_name, target_model_name,
                 print(f'total power consumption: {power_total}', file=log_f)
                 print(f'power/token: {power_total/total_token}')
                 print(f'power/token: {power_total/total_token}', file=log_f)
-
-
-         
-        """  
-        # beam speculative decoding
-#        for gamma in [2,4,6,8]:
-#            for width in [2,4,6,8]:
-        if False:
-            for gamma, width in multi_params:
-                num_beams = num_beams
-                if gamma * width > 32:
-                    break
- 
-                total_time = 0
-                total_token = 0
-                approx_time = 0
-                target_time = 0
-                other_time = 0
-                target_times = 0
-                total_acc_len = 0
-                acc_rate = []
-                target_times = 0
-                approx_times = 0
-                scores = []
-                pred_seq = []
-                cnt = 0
-                P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
-                t1 = time.time()
-
-
-                for input_ids in tqdm(ds):
-                    cnt += 1
-
-                    input_ids = input_ids.to(torch_device)
-                    t = process_time_ns()
-
-                    output, details = multi_speculative_sampling(input_ids, small_model, large_model, 
-                      eos_token_id = tokenizer.eos_token_id,
-                      pad_token_id = tokenizer.pad_token_id, max_len = num_tokens, 
-                      gamma = gamma, width=width, num_beams = num_beams,
-                      top_k = top_k, top_p=top_p, 
-                      random_seed = random_seed, details=True)
-
-                    total_time += process_time_ns() - t
-                    total_token += len(output[0])- input_ids.size(1)
-                    approx_time += details['approx_time']
-                    target_time += details['target_time']
-                    other_time += details['other_time']
-                    total_acc_len += np.sum(details['acc_len'])
-                    acc_rate.append(details['acc_rate'])
-                    target_times += details['target_call_times']
-                    approx_times += details['approx_call_times']
-                    score = get_score(output, large_model, input_ids.size(1))
-                    scores.append(score.item())
-                    pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
-                    if total_time / 1e9 > max_seconds:
-                        print(f'terminated at {cnt}', file=log_f)
-                        print(f'terminated at {cnt}')
-                        break
-
-                t2 = time.time()
-                P.kill()
-                P.wait()
-                outputs = P.stdout.readlines()
-                fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_beam_{gamma}_{width}.pkl")
-                power_total = get_total_power(outputs, t1, t2, fname)
-
-
-                print(f'\n beam speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
-                print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
-                print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}", file=log_f)
-                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}", file=log_f)       
-        
-                print(f'\n beam speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
-                print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}")
-                print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}")
-                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")  
-                bleu_score = bleu.compute(predictions = pred_seq, references = output_dataset[:cnt])
-                print(f'bleu score = {bleu_score}')
-                print(f'bleu score = {bleu_score}', file=log_f)
-             #   break
-            #break
-                print(f'total power consumption: {power_total}')
-                print(f'total power consumption: {power_total}', file=log_f)
-                print(f'power/token: {power_total/total_token}')
-                print(f'power/token: {power_total/total_token}', file=log_f)
-        """
 
        
         # iid beam speculative decoding

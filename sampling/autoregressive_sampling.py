@@ -107,7 +107,7 @@ def random_width_beam_sampling(x : torch.Tensor, model : torch.nn.Module, N : in
         beam_idx = beam_idx.long()
         token = t % vocab_size
         token = token[:,None]
-        beam_scores = last_p[t].log().squeeze()
+        beam_scores = last_p[t].log().view(-1)
 
 
 #        last_p = norm_logits(outputs.logits[::, -1, :], temperature, top_k, top_p)
@@ -120,7 +120,7 @@ def random_width_beam_sampling(x : torch.Tensor, model : torch.nn.Module, N : in
 #        print(past_key_values[0][0].size())
 
         if model.config.is_encoder_decoder:
-            beams = torch.cat((decoder_x[beam_idx], token), dim=1)
+            beams = torch.cat((beams[beam_idx], token), dim=1)
         else:
             beams = torch.cat((beams[beam_idx], token), dim=1)
 
@@ -148,6 +148,8 @@ def random_width_beam_sampling(x : torch.Tensor, model : torch.nn.Module, N : in
             best_score = cdd_score
 
     if model.config.is_encoder_decoder:
-        output = torch.cat((x, output), dim=1)
-    return output[None,:]
+        output = torch.cat((x, output[None,:]), dim=1)
+        return output
+    else:
+        return output[None,:]
 

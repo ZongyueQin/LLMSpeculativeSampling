@@ -14,7 +14,7 @@ import os
 @torch.no_grad()
 def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, target_model : torch.nn.Module, 
                          eos_token_id, pad_token_id, max_len : int , gamma : int = 4, width : int = 8, 
-                         num_beams: int = 8, min_num_beams: int = 2,
+                         num_beams: int = 8, min_num_beams: int = 1,
                          temperature : float = 1, top_k : int = 0, top_p : float = 0, verbose : bool = False, random_seed : int = None,
                          details : bool = False) -> torch.Tensor:
     #print(prefix)
@@ -46,6 +46,7 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                 'target_call_times': target_call_times,
                 'approx_call_times': approx_call_times
             }
+    num_beams_list = []
 
     if approx_model.config.is_encoder_decoder == True:
         encoder_outputs = approx_model.get_encoder()(
@@ -277,6 +278,7 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                 #print(accept)
 
                 if acc_cnt >= min_num_beams:
+                    num_beams_list.append(acc_cnt)
                     # Step 5 update cur_valid_beam
                     cur_valid_beam = accept
                   #  print(p_scores)
@@ -292,6 +294,7 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                     start = end
                 else:
                     # if all draft are rejected, terminate and start re-sample
+                    num_beams_list.append(num_beams)
                     break
 
             #TODO re-sample based on cur_valid_beam and p
@@ -489,7 +492,8 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                 'acc_len': acc_len,
                 'acc_rate': np.mean(acc_rate),
                 'target_call_times': target_call_times,
-                'approx_call_times': approx_call_times
+                'approx_call_times': approx_call_times,
+                'num_beams_list': num_beams_list
             }
         return output_prefix, d
     else:
