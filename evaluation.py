@@ -239,7 +239,7 @@ def evaluate(approx_model_name, target_model_name,
             #BiLD_params = [(0.9, 3), (0.9, 2), (0.9,1)]
             BiLD_params = [(0.9, 3)]
             #BiLD_params = []
-            multi_params = [(4,4,8), (4,4,16), (4,8,8), (4,8,16), (6,4,16), (8,4,16)]
+            multi_params = [(4,2,8),(4,1,8), (4,4,8), (4,4,16), (4,8,8), (4,8,16), (6,4,16), (8,4,16)]
 #            multi_params += [(4,4,4), (4,6,6)]
 #            multi_params = [(6,4,16)]
 #            iid_params = [(4,4), (6,4), (8,4)]
@@ -249,6 +249,31 @@ def evaluate(approx_model_name, target_model_name,
             postfix = '[/INST]'
         input_dataset = [tokenizer.encode(prefix + s['article'] + postfix, return_tensors="pt", max_length=512, truncation=True) for s in dataset]
         output_dataset = [[s['highlights']] for s in dataset]
+    elif dataset_name == 'ChatGPT':
+        dataset = load_dataset('MohamedRashad/ChatGPT-prompts',split='train')
+        input_dataset = [tokenizer.encode(s, return_tensors="pt", max_length=512, truncation=True) for s in dataset['human_prompt']]
+        output_dataset = [s for s in dataset['chatgpt_response']]
+        if 't5' in approx_model_name:
+            BiLD_params = [(0.2,2), (0.3,1),(0.3,2),(0.3,3),(0.9,1),(0.9,2)]
+            multi_params = [(2,1,8),(4,1,4),(4,2,4),(4,1,2),(4,1,8),(4,2,8),(4,4,4),(6,4,4),(4,4,8)]
+
+            iid_params = [(4,2),(4,4)]
+        elif 'opt' in approx_model_name:
+            BiLD_params = [(0.2,2), (0.3,1),(0.3,2),(0.3,3),(0.9,1),(0.9,2)]
+
+            multi_params = [(2,1,8),(4,1,4),(4,2,4),(4,1,2),(4,1,8),(4,2,8),(4,4,4),(6,4,4),(4,4,8)]
+            iid_params = [(4,2),(4,4)]
+
+        elif 'llama' in approx_model_name:
+            BiLD_params = [(0.2,2), (0.3,1),(0.3,2),(0.3,3),(0.9,1),(0.9,2)]
+
+            multi_params = [(2,1,8),(4,1,4),(4,2,4),(4,1,2),(4,1,8),(4,2,8),(4,4,4),(6,4,4),(4,4,8)]
+
+            iid_params = [(4,2),(4,4)]
+        else:
+            prefix = ''
+            postfix = ''
+
     elif dataset_name == 'chatalpaca':
 
         if 't5' in approx_model_name:
@@ -261,7 +286,7 @@ def evaluate(approx_model_name, target_model_name,
             prefix = ''
             postfix = ''
             BiLD_params = [(0.2, 2), (0.3, 2), (0.3, 3)]
-            multi_params = [(4,4), (6,4), (4,6)]
+            multi_params = [(4,1,4),(4,2,4),(4,1,2),(4,1,8),(4,2,8),(4,4,4),(6,4,4)]
 #            multi_params = [(2,1,8), (2,2,8), (2,4,8), (2,6,8), (2,8,8),(2,2,2), (2,2,4), (2,2,8), (2,2,16),(2,2,32)]
             #multi_params = [(6,1,8), (6,2,8), (6,4,8), (6,6,8), (6,8,8)]
             iid_params = [(4,2)]
@@ -271,7 +296,7 @@ def evaluate(approx_model_name, target_model_name,
             postfix = ''
             BiLD_params = [(0.9,1),(0.9,2)]
 #            BiLD_params = []
-            multi_params = [(8,1,2), (8,2,2), (8,1,8), (8,2,8)]#,(4,6,8),(4,8,8),(6,4,8)]
+            multi_params = [(4,1,2),(4,1,4),(4,1,8),(4,2,4),(4,2,8),(8,1,2), (8,2,2), (8,1,8), (8,2,8)]#,(4,6,8),(4,8,8),(6,4,8)]
             iid_params = [(4,2)]
         else:
             prefix = ''

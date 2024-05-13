@@ -518,7 +518,8 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
 
 @torch.no_grad()
 def mjsd_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, target_model : torch.nn.Module, 
-                         eos_token_id, pad_token_id, max_len : int , gamma : int = 4, width : int = 8, num_beams: int = 8,
+                         eos_token_id, pad_token_id, max_len : int , 
+                         gamma : int = 4, width : int = 8, num_beams: int = 8, accept_thres: float = 0.5,
                          temperature : float = 1, top_k : int = 0, top_p : float = 0, verbose : bool = False, random_seed : int = None,
                          details : bool = False) -> torch.Tensor:
     if pad_token_id is None:
@@ -556,8 +557,8 @@ def mjsd_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
 
 
 #    with tqdm(total=T, desc="speculative sampling") as pbar:
-#    if True:
-    try:
+    if True:
+#    try:
         while output_prefix.shape[1] < T:
             # q = M_q[prefix + x_0, x_1, .., x_(gamma-2)]
             prefix_len = output_prefix.shape[1]
@@ -632,6 +633,8 @@ def mjsd_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
             max_n = prefix_len - 1
             max_l = 0
             choice = 0
+
+            """
             for w in range(width):
                 cur_n = prefix_len - 1
                 cur_l = 0
@@ -644,6 +647,7 @@ def mjsd_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                     if random_seed:
                         torch.manual_seed(random_seed)
                     r = torch.rand(1, device = p.device)
+                    #r = 0.5
                     j = x[w, prefix_len + i]
 
                     cur_target_p += torch.log(p[w, prefix_len + i - 1, j])
@@ -665,6 +669,44 @@ def mjsd_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                     if cur_all_accept == True:
                         is_all_accept = True
                         break
+            """
+            """
+            Let's try accept the longest sequences
+            """
+            
+            for w in range(width):
+                cur_n = prefix_len - 1
+                cur_l = 0
+                cur_all_accept = True
+
+                cur_target_p = 0
+                for i in range(inc_len):
+                    if prefix_len + i >= x.size(1):
+                        break
+                    if random_seed:
+                        torch.manual_seed(random_seed)
+                    #r = torch.rand(1, device = p.device)
+                    r = accept_thres
+                    j = x[w, prefix_len + i]
+
+                    cur_target_p += torch.log(p[w, prefix_len + i - 1, j])
+                    cur_draft_p = seq_q[w, i]
+
+                    cur_l += 1
+                    cur_n += 1
+               
+                    if r < torch.min(torch.tensor([1], device=q.device), torch.exp(cur_target_p)/cur_draft_p):
+                        if cur_l > max_l:
+                            max_n = cur_n
+                            max_l = cur_l
+                            choice = w
+                    else:
+                        continue
+                if max_l == inc_len:
+                    is_all_accept = True
+                    break
+            
+
             acc_len.append(max_l)
 
             n = max_n
@@ -704,8 +746,8 @@ def mjsd_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
 
 
             sample_time += process_time_ns() - tt
-    except Exception as e:
-        print(e)
+#    except Exception as e:
+#        print(e)
 
     if approx_model.config.is_encoder_decoder:
         output_prefix = torch.cat((prefix, output_prefix), dim=1)
