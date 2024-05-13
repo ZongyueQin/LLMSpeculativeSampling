@@ -9,6 +9,7 @@ import copy
 from typing import Union, List
 import torch.nn as nn
 from transformers.generation import BeamSampleDecoderOnlyOutput, BeamSampleEncoderDecoderOutput
+from time import process_time_ns
 
 def _debug_show_kvcache(past_key_values):
     if  past_key_values is None:
@@ -28,6 +29,10 @@ class KVCacheModel():
         self._top_k = top_k
         self._top_p = top_p
         self.beam_rollback_flag = False
+        self.forward_time_dict = {'_model_time':0,
+                                  'norm_prob_time':0,
+                                  'prepare_cache_time':0
+                                  }
 
 
     def _forward_with_kvcache(self, input_ids : torch.Tensor, use_debug = False,
@@ -36,10 +41,13 @@ class KVCacheModel():
             copy_cache_index = None) -> torch.Tensor:
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
+        if copy_cache_index is not None:
+            copy_cache_index = copy_cache_index.cpu()
 
         if self._past_key_values is None:
             #assert self._prob_history is None, f"{self._prob_history.shape}"
             # the first forward (prefill) returns the prompt's logits
+            tt = process_time_ns() 
             if self._model.config.is_encoder_decoder == False:
 #                outputs = self._model(input_ids, attention_mask=attention_mask)
                 outputs = self._model(input_ids)
@@ -49,12 +57,17 @@ class KVCacheModel():
                 #print(input_ids.size(), decoder_input_ids.size())
                 outputs = self._model(input_ids, decoder_input_ids = decoder_input_ids)
 
+            self.forward_time_dict['_model_time'] += process_time_ns() - tt
+            tt = process_time_ns()
+
             self._prob_history = outputs.logits
             for i in range(self._prob_history.shape[-2]):   
                 self._prob_history[:, i, :] = norm_logits(self._prob_history[:, i, :], self._temperature, self._top_k, self._top_p)
             self._past_key_values = outputs.past_key_values
             last_q = self._prob_history[:, -1, :]
+            self.forward_time_dict['norm_prob_time'] += process_time_ns() - tt
         else:
+            tt = process_time_ns()
             # return the last token's logits
             cached_len = self._past_key_values[0][0].shape[2]
 #            for values in self._past_key_values:
@@ -82,6 +95,8 @@ class KVCacheModel():
                             repeat_values.append(val[copy_cache_index])
                         past_key_values.append(tuple(repeat_values))
                     self._past_key_values = past_key_values
+            self.forward_time_dict['prepare_cache_time'] += process_time_ns() - tt
+            tt = process_time_ns()
 
                
             if self._model.config.is_encoder_decoder == False:
@@ -104,6 +119,9 @@ class KVCacheModel():
                     _debug_show_kvcache(self._past_key_values)
             
                 outputs = self._model(input_ids, decoder_input_ids = last_input_id, past_key_values=self._past_key_values, use_cache=True)
+            self.forward_time_dict['_model_time'] += process_time_ns() - tt
+
+            tt = process_time_ns()
 
             
             not_cached_q = outputs.logits
@@ -126,7 +144,8 @@ class KVCacheModel():
             
             last_q = not_cached_q[:, -1, :]
             self._past_key_values = outputs.past_key_values
-        
+            self.forward_time_dict['norm_prob_time'] += process_time_ns() - tt
+       
         return last_q
 
 
@@ -203,6 +222,8 @@ class KVCacheModel():
 
     @torch.no_grad()
     def rollback(self, end_pos, choice=None):
+        if choice is not None and isinstance(choice, int) == False:
+            choice = choice.cpu()
         past_key_values_trimmed = []
         assert self._past_key_values
         if self._model.config.is_encoder_decoder == False:

@@ -44,7 +44,10 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                 'acc_len': acc_len,
                 'acc_rate': np.mean(acc_rate),
                 'target_call_times': target_call_times,
-                'approx_call_times': approx_call_times
+                'approx_call_times': approx_call_times,
+                'target_model_time': 0,
+                'target_pre_cache_time': 0,
+                'target_post_prob_time': 0
             }
     num_beams_list = []
 
@@ -68,7 +71,7 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
 #    with tqdm(total=T, desc="speculative sampling") as pbar:
     first_input = True
     candidates = []
-    if True:
+    try:
         while output_prefix.shape[1] < T:
             # q = M_q[prefix + x_0, x_1, .., x_(gamma-2)]
             prefix_len = output_prefix.shape[1]
@@ -306,7 +309,7 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                 cur_p = p[start:end, -1]
                 cur_p = cur_p[cur_valid_beam]
                 p_next_token_scores = beam_scores[cur_valid_beam][:,None].expand_as(cur_p) + cur_p.log()
-                #op = p_next_token_scores 
+                op = p_next_token_scores 
                 p_next_token_scores = norm_logits(p_next_token_scores.view(1,-1), temperature = temperature, top_k = top_k, top_p = top_p).squeeze()
 
                 """    
@@ -323,7 +326,11 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                 print(beam_scores[cur_valid_beam][:,None].expand_as(cur_p)[mask])
                 """
 
-                t = sample(p_next_token_scores, num_samples = num_beams)
+                try:
+                    t = sample(p_next_token_scores, num_samples = num_beams)
+                except:
+                    t = sample(torch.softmax(op.view(-1), dim=0), num_samples = num_beams)
+
                 beam_idx = torch.div(t, vocab_size, rounding_mode='floor')
                 beam_idx = beam_idx.long()
                 token = t % vocab_size
@@ -383,7 +390,10 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                 print(beam_scores[cur_valid_beam][:,None].expand_as(cur_p)[mask])
                 """
                 #TODO minus q
-                t = sample(p_next_token_scores, num_samples = num_beams)
+                try:
+                    t = sample(p_next_token_scores, num_samples = num_beams)
+                except:
+                    t = sample(torch.softmax(op.view(-1), dim=0), num_samples = num_beams)
                 beam_idx = torch.div(t, vocab_size, rounding_mode='floor')
                 beam_idx = beam_idx.long()
                 token = t % vocab_size
@@ -458,6 +468,9 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
 
 
             sample_time += process_time_ns() - tt
+    except Exception as e:
+        print(e)
+        raise RuntimeError('')
 
     for i in range(output_prefix.size(0)):
         output_candidate = output_prefix[i]
@@ -493,7 +506,10 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                 'acc_rate': np.mean(acc_rate),
                 'target_call_times': target_call_times,
                 'approx_call_times': approx_call_times,
-                'num_beams_list': num_beams_list
+                'num_beams_list': num_beams_list,
+                'target_model_time': target_model_cache.forward_time_dict['_model_time'],
+                'target_pre_cache_time': target_model_cache.forward_time_dict['prepare_cache_time'],
+                'target_post_prob_time': target_model_cache.forward_time_dict['norm_prob_time'],
             }
         return output_prefix, d
     else:
@@ -1402,8 +1418,10 @@ def speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, 
                 'acc_len': acc_len,
                 'acc_rate': np.mean(acc_rate),
                 'target_call_times': target_call_times,
-                'approx_call_times': approx_call_times
-
+                'approx_call_times': approx_call_times,
+                'target_model_time': target_model_cache.forward_time_dict['_model_time'],
+                'target_pre_cache_time': target_model_cache.forward_time_dict['prepare_cache_time'],
+                'target_post_prob_time': target_model_cache.forward_time_dict['norm_prob_time'],
             }
         return out, d
     else:

@@ -104,7 +104,7 @@ def random_width_beam_sampling(x : torch.Tensor, model : torch.nn.Module, N : in
 
         t = sample(last_p, num_samples = num_beams)
         beam_idx = torch.div(t, vocab_size, rounding_mode='floor')
-        beam_idx = beam_idx.long()
+        beam_idx = beam_idx.long().cpu()
         token = t % vocab_size
         token = token[:,None]
         beam_scores = last_p[t].log().view(-1)

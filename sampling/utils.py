@@ -43,10 +43,18 @@ def norm_logits(logits : torch.Tensor, temperature : float, top_k : float, top_p
     """
     assert logits.dim() == 2
     #assert logits.isnan().any() == False
+    ori_logits = logits
     logits = logits / temperature
     logits = top_k_top_p_filter(logits, top_k=top_k, top_p=top_p)
-    probs = F.softmax(logits, dim=1)
+    probs = torch.softmax(logits, dim=1)
 #    sample(probs, logits = logits)
+    if probs.isnan().any() or probs.isinf().any() or (probs<0).any():
+        probs = torch.softmax(ori_logits, dim=1)
+    if probs.isnan().any() or probs.isinf().any() or (probs<0).any():
+        print(logits[probs.isnan()])
+        print(logits[probs.isinf()])
+        raise RuntimeError('norm logits error')
+
 
     return probs
 
@@ -56,7 +64,11 @@ def sample(probs : torch.Tensor, num_samples: int = 1):
         replacement = True
     else:
         replacement = False
-    idx_next = torch.multinomial(probs, num_samples=num_samples, replacement = replacement)
+    try:
+        idx_next = torch.multinomial(probs, num_samples=num_samples, replacement = replacement)
+    except:
+        print((probs<0).any(), probs.isnan().any(), probs.isinf().any())
+        raise RuntimeError('prob error')
     #if (idx_next.item() == 0) and False:
     #    raise RuntimeError
     return idx_next
