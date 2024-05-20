@@ -519,7 +519,7 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
 @torch.no_grad()
 def mjsd_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Module, target_model : torch.nn.Module, 
                          eos_token_id, pad_token_id, max_len : int , 
-                         gamma : int = 4, width : int = 8, num_beams: int = 8, accept_thres: float = 0.5,
+                         gamma : int = 4, width : int = 8, num_beams: int = 8, accept_thres: float = 0.1,
                          temperature : float = 1, top_k : int = 0, top_p : float = 0, verbose : bool = False, random_seed : int = None,
                          details : bool = False) -> torch.Tensor:
     if pad_token_id is None:
@@ -694,8 +694,11 @@ def mjsd_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
 
                     cur_l += 1
                     cur_n += 1
+
+                    if r >= 1: # always reject
+                        continue
                
-                    if r < torch.min(torch.tensor([1], device=q.device), torch.exp(cur_target_p)/cur_draft_p):
+                    if r <= torch.min(torch.tensor([1], device=q.device), torch.exp(cur_target_p)/cur_draft_p) or r < 0: # r < 0 means always accept
                         if cur_l > max_l:
                             max_n = cur_n
                             max_l = cur_l
