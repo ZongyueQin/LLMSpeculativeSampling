@@ -360,20 +360,27 @@ def beam_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.
             end_cnt = 0
             for i in range(mask.size(0)):
                 if mask[i].int().sum() > ori_eos_cnt: #encounter eos
-                    end_cnt += 1
-                    row_mask = torch.cumsum(mask[i].float(), dim=0)
-                    row_mask = (row_mask < ori_eos_cnt+1)
-                    end = row_mask.int().sum()
-                    if end < mask.size(1):
-                        row_mask[end] = True
-                    output_candidate = output_prefix[i][row_mask] 
-                    #print(output_prefix[i].size())
-                    #print(mask[i].size())
-                    #print(output_candidate.size())
+                    if extra_sample_cnt > 1:
+                        end_cnt += 1
+                        row_mask = torch.cumsum(mask[i].float(), dim=0)
+                        row_mask = (row_mask < ori_eos_cnt+1)
+                        end = row_mask.int().sum()
+                        if end < mask.size(1):
+                            row_mask[end] = True
+                        output_candidate = output_prefix[i][row_mask] 
 
-                    cdd_score = beam_scores[i]/(output_candidate.size(-1) - init_len)
-                    cur_valid_beam[i] = False
-                    candidates.append((output_candidate, cdd_score))
+                        cdd_score = beam_scores[i]/(output_candidate.size(-1) - init_len)
+                        cur_valid_beam[i] = False
+                        candidates.append((output_candidate, cdd_score))
+                    else:
+                        end_cnt = 1000
+                        row_mask = torch.cumsum(mask[i].float(), dim=0)
+                        row_mask = (row_mask < ori_eos_cnt+1)
+                        end = row_mask.int().sum()
+                        if end < mask.size(1):
+                            row_mask[end] = True
+                        output_prefix = output_prefix[i][row_mask].view(1,-1) 
+                        break
             if end_cnt >= mask.size(0):
                 break
             

@@ -129,7 +129,7 @@ def evaluate(approx_model_name, target_model_name,
     print(f"begin loading models: \n {approx_model_name} \n {target_model_name}")
     if 'llama' in approx_model_name and 'GPTQ' not in approx_model_name:
         small_model = LlamaForCausalLM.from_pretrained(approx_model_name, 
-                                                       torch_dtype=torch.float32,
+                                                       torch_dtype=torch.float16,
                                                        device_map="auto",
                                                        trust_remote_code=True,
                                                        token=hf_token)
@@ -143,7 +143,7 @@ def evaluate(approx_model_name, target_model_name,
 
     if 'llama' in target_model_name:
         large_model = LlamaForCausalLM.from_pretrained(target_model_name, 
-                                                       torch_dtype=torch.float32,
+                                                       torch_dtype=torch.float16,
                                                        device_map="auto",
                                                        offload_folder="offload",
                                                        trust_remote_code=True,
@@ -245,7 +245,6 @@ def evaluate(approx_model_name, target_model_name,
         u = 100000
         l = 0
         ds = [pt for pt in input_dataset if (pt.size(-1) < u and pt.size(-1) >= l)]
-        ds = ds[:20]
 
         print(f'input length {l}-{u}, {len(ds)} data in total')
         total_input_tokens = sum([d.size(1) for d in ds])
@@ -305,7 +304,7 @@ def evaluate(approx_model_name, target_model_name,
 
 
 
-        """        
+                
         # convetional speculative decoding
 #        time.sleep(100)
         total_time = 0
@@ -394,7 +393,7 @@ def evaluate(approx_model_name, target_model_name,
         print(f'power/token: {power_total/total_token}', file=log_f)
         print(f'target_model_time: {target_model_time/1e9}, pre cache time: {target_pre_cache_time/1e9}, post prob time: {target_post_prob_time/1e9}')
         print(f'target_model_time: {target_model_time/1e9}, pre cache time: {target_pre_cache_time/1e9}, post prob time: {target_post_prob_time/1e9}', file=log_f)
-        """
+        
         
         # BiLD speculative decoding
         BiLD_stop = False
@@ -476,7 +475,7 @@ def evaluate(approx_model_name, target_model_name,
                 print(f'power/token: {power_total/total_token}', file=log_f)
         
         # mjsd speculative decoding
-        if False:
+        if True:
             for params in multi_params:
                 if len(params) == 2:
                     gamma, width = params[0], params[1]
