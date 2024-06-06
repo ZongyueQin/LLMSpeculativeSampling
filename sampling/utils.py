@@ -2,6 +2,61 @@ import torch
 from torch.nn import functional as F
 import pickle
 
+def get_seq_att_mask(input_cnt, all_input_idx, all_beam_idx, all_next_token, input_len, pad_token_id, device='cpu'):
+    """
+    Return sequences of shape input_cnt * max_seq_len
+    Return tree attention mask of shape input_cnt * max_seq_len * max_seq_len
+
+    """
+    ret_seq = [[] for i in range(input_cnt)]
+    ret_att_mask = [[] for i in range(input_cnt)]
+    position_ids = [[] for i in range(input_cnt)]
+
+    last_beam_att_mask = [[] for i in range(all_input_idx[0].numel())]
+    max_seq_len = 0
+    pos = [[i,-1] for i in range(input_cnt)]
+    position = input_len
+    for input_idx_list, beam_idx_list, next_token_list in zip(all_input_idx, all_beam_idx, all_next_token):
+        cur_beam_att_mask = []
+        for j in range(input_idx_list.numel()):
+            input_idx = input_idx_list[j].item()
+            next_token = next_token_list[j].item()
+            beam_idx = beam_idx_list[j].item()
+
+            cur_seq_len = len(ret_seq[input_idx])
+            pos.append([input_idx, cur_seq_len])
+            ret_seq[input_idx].append(next_token)
+            position_ids[input_idx].append(position)
+
+            if len(ret_seq[input_idx]) > max_seq_len:
+              max_seq_len = len(ret_seq[input_idx])
+            prev_seq_len = len(last_beam_att_mask[beam_idx])
+
+            mask = last_beam_att_mask[beam_idx] + [False for k in range(cur_seq_len-prev_seq_len)]+[True]
+            ret_att_mask[input_idx].append(mask)
+            cur_beam_att_mask.append(mask)
+        last_beam_att_mask = cur_beam_att_mask
+        position += 1
+
+    """ padding """
+    for i in range(input_cnt):
+      position_ids[i] += [0 for j in range(max_seq_len-len(ret_seq[i]))]
+      ret_seq[i] += [pad_token_id for j in range(max_seq_len-len(ret_seq[i]))]
+
+      for j in range(len(ret_att_mask[i])):
+        ret_att_mask[i][j] += [False for k in range(max_seq_len-len(ret_att_mask[i][j]))]
+      ret_att_mask[i] += [[False for k in range(max_seq_len)] for j in range(max_seq_len-len(ret_att_mask[i]))]
+
+    ret_seq = torch.LongTensor(ret_seq).to(device)
+    ret_att_mask = torch.Tensor(ret_att_mask)
+    full_att_mask = torch.ones(input_cnt, max_seq_len, max_seq_len+input_len).bool()
+    full_att_mask[:,:,input_len:] = ret_att_mask
+    full_att_mask = full_att_mask.to(device)
+    pos = torch.LongTensor(pos).to(device)
+    position_ids = torch.LongTensor(position_ids).to(device)
+    return ret_seq, full_att_mask, pos, position_ids
+
+
 # copy from https://github.com/LeeSinLiang/microGPT/blob/ed40cf9780dbeb180adfe94c227d4aa97e69250e/gpt.py
 def top_k_top_p_filter(logits: torch.Tensor, top_k: int = 0, top_p: float = 0.0):
     """

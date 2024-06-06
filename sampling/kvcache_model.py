@@ -34,6 +34,98 @@ class KVCacheModel():
                                   'prepare_cache_time':0
                                   }
 
+    def forward_tree_attention(self, 
+                               input_ids : torch.Tensor,
+                               prefix: torch.Tensor,
+                               extra_attention_mask: torch.Tensor,
+                               position_ids: torch.Tensor,
+                               gather_pos: torch.Tensor,
+                               ) -> torch.Tensor:
+        assert self._model.config.is_encoder_decoder == False
+        prefix_len = prefix.size(-1)
+        if self._past_key_values is None:
+            tt = process_time_ns()
+            if prefix.size(0) < input_ids.size(0):
+                assert prefix.size(0) == 1
+                input_ids = torch.concat((prefix.repeat(input_ids.size(0),1), input_ids), dim=1)
+            else:
+                input_ids = torch.concat((prefix, input_ids), dim=1)
+
+            if position_ids.size(1) < input_ids.size(1):
+                position_ids = torch.concat(
+                                      (torch.arange(prefix_len).to(input_ids.device).view(1,-1).repeat(position_ids.size(0),1),
+                                      position_ids),
+                                      dim=1,
+                                      )
+
+#            print(input_ids)
+#            print(extra_attention_mask)
+#            print(position_ids)
+            
+            outputs = self._model(input_ids, extra_attention_mask = extra_attention_mask, position_ids = position_ids)
+
+            self.forward_time_dict['_model_time'] += process_time_ns() - tt
+            tt = process_time_ns()
+
+            self._prob_history = outputs.logits
+            for i in range(self._prob_history.shape[-2]):   
+                self._prob_history[:, i, :] = norm_logits(self._prob_history[:, i, :], self._temperature, self._top_k, self._top_p)
+            self._past_key_values = outputs.past_key_values
+            self.forward_time_dict['norm_prob_time'] += process_time_ns() - tt
+        else:
+            tt = process_time_ns()
+            # return the last token's logits
+            cached_len = self._past_key_values[0][0].shape[2]
+
+            assert self._past_key_values[0][0].size(0) == input_ids.size(0)
+
+            input_ids = torch.concat((prefix, input_ids), dim=1)
+            last_input_id = input_ids[:, cached_len:]
+            position_ids = torch.concat(
+                                      (torch.arange(prefix_len).to(input_ids.device).view(1,-1).repeat(position_ids.size(0),1),
+                                      position_ids),
+                                      dim=1,
+                                      )
+            position_ids = position_ids[:, cached_len:]
+
+
+            if last_input_id.dim() == 1:
+                last_input_id = torch.unsqueeze(last_input_id, 0)
+            if position_ids.dim() == 1:
+                position_ids = torch.unsqueeze(position_ids, 0)
+
+
+            
+            outputs = self._model(last_input_id, 
+                                  past_key_values=self._past_key_values, 
+                                  use_cache=True, 
+                                  extra_attention_mask = extra_attention_mask,
+                                  position_ids = position_ids,
+                                  )
+            self.forward_time_dict['_model_time'] += process_time_ns() - tt
+
+            tt = process_time_ns()
+
+            
+            not_cached_q = outputs.logits
+            if not_cached_q.dim() == 2:
+                not_cached_q = torch.unsqueeze(not_cached_q, 0)
+                
+
+            for i in range(not_cached_q.shape[-2]):   
+                not_cached_q[:, i, :] = norm_logits(not_cached_q[:, i, :], self._temperature, self._top_k, self._top_p)    
+            self._prob_history = torch.cat([self._prob_history, not_cached_q], dim=1)
+            
+            self._past_key_values = outputs.past_key_values
+            self.forward_time_dict['norm_prob_time'] += process_time_ns() - tt
+       
+        gather_pos[:,1] += prefix_len
+        p = self._prob_history[gather_pos[:,0], gather_pos[:,1]]
+
+        return p
+
+
+
 
     def _forward_with_kvcache(self, input_ids : torch.Tensor, use_debug = False,
             attention_mask = None,
@@ -221,6 +313,39 @@ class KVCacheModel():
         self.rollback(None, choice)
 
     @torch.no_grad()
+    def rollback_tree_attention(self, input_idx, mask):
+        assert isinstance(self._model, BloomForCausalLM) == False
+        num_beams, num_head, _, emb_dim = self._past_key_values[0][0].size()
+        width = input_idx.numel()
+        past_key_values_trimmed = []
+        
+        for kv in self._past_key_values:
+            k, v = kv
+            k = k[input_idx, :, :, :]
+            k = k.transpose(1,2)
+            k = k[mask]
+            try:
+                k = k.view(width,-1, num_head, emb_dim)
+            except Exception as e:
+                print(mask.float().sum(dim=1))
+                print(k.numel())
+                print(width, num_head, emb_dim)
+                print(self._past_key_values[0][0].size())
+                raise RuntimeError('s')
+            k = k.transpose(1,2) 
+            v = v[input_idx, :, :, :].transpose(1,2)[mask].view(width,-1, num_head, emb_dim).transpose(1,2) 
+            kv_trimmed = (k, v)
+            past_key_values_trimmed.append(kv_trimmed)
+        self._past_key_values = past_key_values_trimmed
+        if self._prob_history is not None:
+            vocab_size = self._prob_history.size(-1)
+            self._prob_history = self._prob_history[input_idx, :, :][mask].view(width, -1, vocab_size)
+        #print(self._past_key_values[0][0].size())
+        #print(self._prob_history.size())
+        #xxx = input()
+
+
+    @torch.no_grad()
     def rollback(self, end_pos, choice=None):
         if choice is not None and isinstance(choice, int) == False:
             choice = choice.cpu()
@@ -354,11 +479,12 @@ class KVCacheModel():
         self._model._validate_model_kwargs(model_kwargs.copy())
 
         logits_warper = LogitsProcessorList()
+        
         if top_k is not None:
             logits_warper.append(TopKLogitsWarper(top_k))
         if top_p is not None:
             logits_warper.append(TopPLogitsWarper(top_p))
-
+        
         # 12. prepare beam search scorer
         beam_scorer = BeamSearchScorer(
                batch_size=1,

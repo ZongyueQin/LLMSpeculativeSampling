@@ -11,9 +11,10 @@ from transformers import T5ForConditionalGeneration
 from datasets import load_dataset
 
 from sampling import autoregressive_sampling, speculative_sampling, speculative_sampling_v2, multi_speculative_sampling, mjsd_speculative_sampling
-from sampling import beam_speculative_sampling
+from sampling import beam_speculative_sampling_v2 as beam_speculative_sampling
 from sampling import BiLD_sampling
 from sampling import random_width_beam_sampling
+from sampling.models.modeling_llama import LlamaForCausalLM
 
 from globals import Decoder
 import json
@@ -127,8 +128,8 @@ def evaluate(approx_model_name, target_model_name,
     
     print(f"begin loading models: \n {approx_model_name} \n {target_model_name}")
     if 'llama' in approx_model_name and 'GPTQ' not in approx_model_name:
-        small_model = AutoModelForCausalLM.from_pretrained(approx_model_name, 
-                                                       torch_dtype=torch.float16,
+        small_model = LlamaForCausalLM.from_pretrained(approx_model_name, 
+                                                       torch_dtype=torch.float32,
                                                        device_map="auto",
                                                        trust_remote_code=True,
                                                        token=hf_token)
@@ -141,8 +142,8 @@ def evaluate(approx_model_name, target_model_name,
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
     if 'llama' in target_model_name:
-        large_model = AutoModelForCausalLM.from_pretrained(target_model_name, 
-                                                       torch_dtype=torch.float16,
+        large_model = LlamaForCausalLM.from_pretrained(target_model_name, 
+                                                       torch_dtype=torch.float32,
                                                        device_map="auto",
                                                        offload_folder="offload",
                                                        trust_remote_code=True,
@@ -244,6 +245,7 @@ def evaluate(approx_model_name, target_model_name,
         u = 100000
         l = 0
         ds = [pt for pt in input_dataset if (pt.size(-1) < u and pt.size(-1) >= l)]
+        ds = ds[:20]
 
         print(f'input length {l}-{u}, {len(ds)} data in total')
         total_input_tokens = sum([d.size(1) for d in ds])
@@ -303,7 +305,7 @@ def evaluate(approx_model_name, target_model_name,
 
 
 
-                
+        """        
         # convetional speculative decoding
 #        time.sleep(100)
         total_time = 0
@@ -328,6 +330,7 @@ def evaluate(approx_model_name, target_model_name,
 
         #print(tokenizer.eos_token_id)
         #print(tokenizer.pad_token_id)
+        
         for input_ids in tqdm(ds):
             cnt += 1
 #            if cnt % 16 == 0:
@@ -391,7 +394,7 @@ def evaluate(approx_model_name, target_model_name,
         print(f'power/token: {power_total/total_token}', file=log_f)
         print(f'target_model_time: {target_model_time/1e9}, pre cache time: {target_pre_cache_time/1e9}, post prob time: {target_post_prob_time/1e9}')
         print(f'target_model_time: {target_model_time/1e9}, pre cache time: {target_pre_cache_time/1e9}, post prob time: {target_post_prob_time/1e9}', file=log_f)
-       
+        """
         
         # BiLD speculative decoding
         BiLD_stop = False
@@ -473,7 +476,7 @@ def evaluate(approx_model_name, target_model_name,
                 print(f'power/token: {power_total/total_token}', file=log_f)
         
         # mjsd speculative decoding
-        if True:
+        if False:
             for params in multi_params:
                 if len(params) == 2:
                     gamma, width = params[0], params[1]
@@ -648,15 +651,13 @@ def evaluate(approx_model_name, target_model_name,
                 print(f'power/token: {power_total/total_token}', file=log_f)
 
    
-        for width in [2,3,4,6,8]:
-            for gamma in [2,3,4,6,8]:
+        for width in [2,3,4]:
+            for gamma in [2,3,4,6]:
 
 #        if True:
 #            for gamma, width in multi_params:
                 num_beams = width
 #                num_beams = width
-                if gamma * width > 8:
-                    break
 #                time.sleep(100)
                 total_time = 0
                 total_token = 0
