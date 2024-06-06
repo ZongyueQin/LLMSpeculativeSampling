@@ -156,7 +156,7 @@ def evaluate(approx_model_name, target_model_name,
                                                        trust_remote_code=True)
     top_k = 20
     top_p = 0.9
-    repeats = 4
+    repeats = 1
     
     if dataset_name == 'cnndm':
         dataset = load_dataset('cnn_dailymail', '3.0.0', split='test')
@@ -395,7 +395,7 @@ def evaluate(approx_model_name, target_model_name,
         
         # BiLD speculative decoding
         BiLD_stop = False
-        if True:
+        if False:
             for fallback_thres, rollback_thres in BiLD_params:
 #                time.sleep(100)
                 total_time = 0
@@ -562,7 +562,7 @@ def evaluate(approx_model_name, target_model_name,
 
        
         # iid beam speculative decoding
-        if True:
+        if False:
             for gamma, width in iid_params:
 
               #  if gamma * width > 32:
@@ -641,6 +641,163 @@ def evaluate(approx_model_name, target_model_name,
                 print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")
              #   break
             #break
+
+                print(f'total power consumption: {power_total}')
+                print(f'total power consumption: {power_total}', file=log_f)
+                print(f'power/token: {power_total/total_token}')
+                print(f'power/token: {power_total/total_token}', file=log_f)
+
+   
+        for width in [2,3,4,6,8]:
+            for gamma in [2,3,4,6,8]:
+
+#        if True:
+#            for gamma, width in multi_params:
+                num_beams = width
+#                num_beams = width
+                if gamma * width > 8:
+                    break
+#                time.sleep(100)
+                total_time = 0
+                total_token = 0
+                approx_time = 0
+                target_time = 0
+                other_time = 0
+                target_times = 0
+                total_acc_len = 0
+                acc_rate = []
+                target_times = 0
+                approx_times = 0
+                scores = []
+                pred_seq = []
+                cnt = 0
+                P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
+                t1 = time.time()
+
+
+                for input_ids in tqdm(ds):
+                    cnt += 1
+                    #if cnt % 16 == 0:
+                    #    time.sleep(0.025)
+
+
+                    input_ids = input_ids.to(torch_device)
+                    t = process_time_ns()
+
+                    output, details = beam_speculative_sampling(input_ids, small_model, large_model, 
+                      eos_token_id = tokenizer.eos_token_id,
+                      pad_token_id = tokenizer.pad_token_id, max_len = num_tokens, 
+                      gamma = gamma, width=width, num_beams = num_beams,
+                      top_k = top_k, top_p=top_p, 
+                      random_seed = random_seed, details=True)
+                    #print(output)
+                    #print(input_ids)
+
+                    total_time += process_time_ns() - t
+                    total_token += len(output[0])- input_ids.size(1)
+                    approx_time += details['approx_time']
+                    target_time += details['target_time']
+                    other_time += details['other_time']
+                    total_acc_len += np.sum(details['acc_len'])
+                    acc_rate.append(details['acc_rate'])
+                    target_times += details['target_call_times']
+                    approx_times += details['approx_call_times']
+                    score = get_score(output, large_model, input_ids.size(1))
+                    if score.isnan().any():
+                        print(input_ids)
+                        print(output)
+                        print(tokenizer.eos_token_id)
+                        raise RuntimeError('score nan')
+                    #    xxx = input()
+                    scores.append(score.item())
+                    pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+                    if total_time / 1e9 > max_seconds:
+                        print(f'terminated at {cnt}', file=log_f)
+                        print(f'terminated at {cnt}')
+                        break
+
+                t2 = time.time()
+                P.kill()
+                P.wait()
+                outputs = P.stdout.readlines()
+                fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_true_beam_{gamma}_{width}.pkl")
+                power_total = get_total_power(outputs, t1, t2, fname)
+
+
+                print(f'\n true beam speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
+                print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
+                print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}", file=log_f)
+                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}", file=log_f)       
+        
+                print(f'\n true beam speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
+                print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}")
+                print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}")
+                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")  
+            #    break
+            #break
+                print(f'total power consumption: {power_total}')
+                print(f'total power consumption: {power_total}', file=log_f)
+                print(f'power/token: {power_total/total_token}')
+                print(f'power/token: {power_total/total_token}', file=log_f)
+
+        for max_beams in [2,3]:
+            for min_beams in [1,2,3]:
+                if min_beams > max_beams:
+                    continue
+                total_time = 0
+                total_token = 0
+                approx_time = 0
+                target_time = 0
+                other_time = 0
+                target_times = 0
+                total_acc_len = 0
+                acc_rate = []
+                target_times = 0
+                approx_times = 0
+                scores = []
+                pred_seq = []
+                cnt = 0
+                P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
+                t1 = time.time()
+
+                for input_ids in tqdm(ds):
+                    cnt += 1
+                    #if cnt % 16 == 0:
+                    #    time.sleep(0.025)
+
+
+                    input_ids = input_ids.to(torch_device)
+                    t = process_time_ns()
+            
+                    output = random_width_beam_sampling(input_ids, large_model, num_tokens,
+                        max_num_beams = max_beams, min_num_beams = min_beams,
+                        eos_token_id = tokenizer.eos_token_id, 
+                        top_k = top_k, top_p=top_p, pad_token_id = tokenizer.pad_token_id)
+
+                    total_time += process_time_ns() - t
+                    total_token += len(output[0])- input_ids.size(1)
+                    score = get_score(output, large_model, input_ids.size(1))
+                    scores.append(score.item())
+                    pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+
+                    if total_time / 1e9 > max_seconds:
+                        print(f'terminated at {cnt}', file=log_f)
+                        print(f'terminated at {cnt}')
+                        break
+
+                t2 = time.time()
+                P.kill()
+                P.wait()
+                outputs = P.stdout.readlines()
+                fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_rwbd_{max_beams}_{min_beams}.pkl")
+                power_total = get_total_power(outputs, t1, t2, fname)
+                print(t1, t2)
+
+                print(f'\n rwbd decoding {(max_beams, min_beams)} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
+                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}", file=log_f)       
+        
+                print(f'\n rwbd decoding {(max_beams, min_beams)} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
+                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")  
 
                 print(f'total power consumption: {power_total}')
                 print(f'total power consumption: {power_total}', file=log_f)
