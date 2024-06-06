@@ -39,7 +39,7 @@ def beam_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.
 
     approx_model_cache = KVCacheModel(approx_model, temperature, top_k, top_p)
     target_model_cache = KVCacheModel(target_model, temperature, top_k, top_p)
-#    debug_target_model_cache = KVCacheModel(target_model, temperature, top_k, top_p)
+    #debug_target_model_cache = KVCacheModel(target_model, temperature, top_k, top_p)
 
     assert prefix.shape[0] == 1, "input batch size must be 1"
 
@@ -136,7 +136,7 @@ def beam_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.
 #            print(p.size())
             target_call_times += 1
             """ for debugging """
-            """
+            """ 
             concat_all_input_idx = torch.concat(all_input_idx, dim=0)
             _ = debug_target_model_cache.generate(x, 1, attention_mask = att_mask, copy_cache_index = concat_all_input_idx)
  #           print(x)
@@ -154,7 +154,7 @@ def beam_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.
                     print(torch.sum(torch.abs(cur_p - gt_p[start:end, prefix_len+i-1].squeeze()), dim=-1))
                     xxx = input()
                 start += num_beams
-            """
+            """ 
             
 
             vocab_size = p.size(-1)
@@ -379,7 +379,7 @@ def beam_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.
                         end = row_mask.int().sum()
                         if end < mask.size(1):
                             row_mask[end] = True
-                        output_prefix = output_prefix[i][row_mask].view(1,-1) 
+                        output_prefix = output_prefix[i][row_mask].view(1,-1)
                         break
             if end_cnt >= mask.size(0):
                 break
@@ -579,12 +579,9 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
             extra_attention_mask = None
             if target_model.config.is_encoder_decoder == False:
                 input_cnt = num_beams
-                ret_seq, extra_att_mask, pos, position_ids = get_seq_att_mask(input_cnt, all_input_idx[1:], all_beam_idx, all_next_token, prefix_len, pad_token_id, device=output_prefix.device)
-                ret_seq = torch.concat((x[:num_beams,:prefix_len], ret_seq),dim=1)
  #               print(x)
  #               print(ret_seq)
  #               print(extra_att_mask)
-                outputs = target_model_cache._model(ret_seq, extra_attention_mask = extra_att_mask) 
                 all_input_idx = torch.concat(all_input_idx, dim=0)
                 _ = target_model_cache.generate(x, 1, attention_mask = att_mask, copy_cache_index = all_input_idx)
             else:
@@ -598,14 +595,10 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                         copy_cache_index = all_input_idx)
             target_call_times += 1
             p = target_model_cache._prob_history
-            gt_p = p
             
             
-            logits = outputs.logits
-            pos[:,1] += prefix_len
 
 #            print(pos)
-            p = norm_logits(logits[pos[:,0],pos[:,1]], temperature, top_k, top_p)
             #print(p.size())
             #xxx = input()
             
@@ -670,21 +663,9 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                 #print('prefix_len+i')
                 #print(prefix_len+i-1,i)
                 #print(x[0,prefix_len+i-1])
-                print(start,end) 
-                """
+                
                 cur_p = p[start:end, prefix_len+i-1].squeeze() # shape: batch_size * V 
-                """
-
-                cur_p = p[start:end]
-                
-                err = torch.sum(torch.abs(cur_p - gt_p[start:end, prefix_len+i-1].squeeze()))
-                
-                if err > 0.01:
-                    print(start,end,prefix_len+i-1)
-                    print(err)
-                    print(torch.sum(torch.abs(cur_p - gt_p[start:end, prefix_len+i-1].squeeze()), dim=-1))
-
-               #     xxx = input()
+                #     xxx = input()
                 
                 #print(cur_p[0].nonzero())
                 #print(cur_p[1].nonzero())
@@ -719,7 +700,7 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
 
 
                     r = torch.rand(1, device = p.device)-1e-5
-                    p_scores = q_scores
+                    #p_scores = q_scores
                     accept = (p_scores/(q_scores+1e-5)) > r
 #                    if i == inc_len - 1:
 #                        accept[:] = False
@@ -773,10 +754,9 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
             
             if max_l == inc_len: # all accept
                 
-                """
+                
                 cur_p = p[start:end, -1]
-                """
-                cur_p = p[start:end]
+                
                 
                 
                 cur_p = cur_p[cur_valid_beam]
@@ -841,10 +821,7 @@ def beam_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                 target_model_cache.rollback(n+2, choice)
             else:
                  
-                """
                 cur_p = p[start:end, n]
-                """
-                cur_p = p[start:end]
                 
                 
                 #print(cur_p.sum(dim=1))

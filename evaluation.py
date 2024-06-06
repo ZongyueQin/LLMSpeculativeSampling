@@ -15,6 +15,7 @@ from sampling import beam_speculative_sampling_v2 as beam_speculative_sampling
 from sampling import BiLD_sampling
 from sampling import random_width_beam_sampling
 from sampling.models.modeling_llama import LlamaForCausalLM
+from sampling.models.modeling_opt import OPTForCausalLM
 
 from globals import Decoder
 import json
@@ -133,6 +134,13 @@ def evaluate(approx_model_name, target_model_name,
                                                        device_map="auto",
                                                        trust_remote_code=True,
                                                        token=hf_token)
+    elif 'opt' in approx_model_name:
+        small_model = OPTForCausalLM.from_pretrained(approx_model_name, 
+                                                       torch_dtype=torch.float16,
+                                                       device_map="auto",
+                                                       trust_remote_code=True,
+                                                       token=hf_token)
+
 
     else:
         small_model = AutoModelForCausalLM.from_pretrained(approx_model_name, 
@@ -148,6 +156,14 @@ def evaluate(approx_model_name, target_model_name,
                                                        offload_folder="offload",
                                                        trust_remote_code=True,
                                                        token=hf_token)
+    elif 'opt' in target_model_name:
+        large_model = OPTForCausalLM .from_pretrained(target_model_name, 
+                                                       torch_dtype=torch.float16,
+                                                       device_map="auto",
+                                                       offload_folder="offload",
+                                                       trust_remote_code=True,
+                                                       token=hf_token)
+
 
     else:
         large_model = AutoModelForCausalLM.from_pretrained(target_model_name, 
