@@ -1,7 +1,7 @@
 import os
-#os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
-os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,3,6'
 
+import pandas as pd
 import torch
 import argparse
 import contexttimer
@@ -16,6 +16,7 @@ from sampling import BiLD_sampling
 from sampling import random_width_beam_sampling
 from sampling.models.modeling_llama import LlamaForCausalLM
 from sampling.models.modeling_opt import OPTForCausalLM
+from sampling.utils import exact_match_references, execution_accuracy_references 
 
 from globals import Decoder
 import json
@@ -26,8 +27,56 @@ import numpy as np
 import random
 import subprocess
 import pickle
+import evaluate as hf_evaluate
 #from pyJoules.energy_meter import measure_energy
 hf_token = os.environ['HFTOKEN']
+
+def find_fields_MYSQL_like(db_name, spider_schema):
+  df = spider_schema[spider_schema['Database name'] == db_name]
+  df = df.groupby(' Table Name')
+  output = ""
+  for name, group in df:
+    output += "Table " +name+ ', columns = ['
+    for index, row in group.iterrows():
+      output += row[" Field Name"]+','
+    output = output[:-1]
+    output += "]\n"
+  return output
+
+def creatiing_schema(DATASET_JSON):
+    schema_df = pd.read_json(DATASET_JSON)
+    schema_df = schema_df.drop(['column_names','table_names'], axis=1)
+    schema = []
+    f_keys = []
+    p_keys = []
+    for index, row in schema_df.iterrows():
+        tables = row['table_names_original']
+        col_names = row['column_names_original']
+        col_types = row['column_types']
+        foreign_keys = row['foreign_keys']
+        primary_keys = row['primary_keys']
+        for col, col_type in zip(col_names, col_types):
+            index, col_name = col
+            if index == -1:
+                for table in tables:
+                    schema.append([row['db_id'], table, '*', 'text'])
+            else:
+                schema.append([row['db_id'], tables[index], col_name, col_type])
+        for primary_key in primary_keys:
+            index, column = col_names[primary_key]
+            p_keys.append([row['db_id'], tables[index], column])
+        for foreign_key in foreign_keys:
+            first, second = foreign_key
+            first_index, first_column = col_names[first]
+            second_index, second_column = col_names[second]
+            f_keys.append([row['db_id'], tables[first_index], tables[second_index], first_column, second_column])
+    spider_schema = pd.DataFrame(schema, columns=['Database name', ' Table Name', ' Field Name', ' Type'])
+    spider_primary = pd.DataFrame(p_keys, columns=['Database name', 'Table Name', 'Primary Key'])
+    spider_foreign = pd.DataFrame(f_keys,
+                        columns=['Database name', 'First Table Name', 'Second Table Name', 'First Table Foreign Key',
+                                 'Second Table Foreign Key'])
+    return spider_schema,spider_primary,spider_foreign
+
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='args for main.py')
@@ -113,18 +162,19 @@ def evaluate(approx_model_name, target_model_name,
     log_f = open(log_file, 'w')
     
     tokenizer = AutoTokenizer.from_pretrained(approx_model_name, trust_remote_code=True, token=hf_token)
-    tokenizer2 = AutoTokenizer.from_pretrained(target_model_name, trust_remote_code=True, token=hf_token)
+
+    #tokenizer2 = AutoTokenizer.from_pretrained(target_model_name, trust_remote_code=True, token=hf_token)
     print(approx_model_name, file=log_f)
     print(target_model_name, file=log_f)
 
     vocab1 = tokenizer.get_vocab()
-    vocab2 = tokenizer2.get_vocab()
-    if vocab1 == vocab2:
-        print("Vocabularies are the same. Proceed")
-    else:
-        print("Vocabularies are different.")
-        print("Vocabularies are different.", file=log_f)
-        return
+    #vocab2 = tokenizer2.get_vocab()
+    #if vocab1 == vocab2:
+    #    print("Vocabularies are the same. Proceed")
+    #else:
+    #    print("Vocabularies are different.")
+    #    print("Vocabularies are different.", file=log_f)
+    #    return
     Decoder().set_tokenizer(tokenizer)
     
     print(f"begin loading models: \n {approx_model_name} \n {target_model_name}")
@@ -149,13 +199,40 @@ def evaluate(approx_model_name, target_model_name,
                                                        trust_remote_code=True)
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    if 'llama' in target_model_name:
+    if 'Llama-3' in target_model_name:
+         large_model = LlamaForCausalLM.from_pretrained(target_model_name, 
+                                                       torch_dtype=torch.float16,
+                                                       device_map="auto",
+                                                       offload_folder="offload",
+                                                       trust_remote_code=True,
+                                                       cache_dir='/local2/shared_cache_huggingface/',
+#                                                       _commit_hash='cfe96d938c52db7c6d936f99370c0801b24233c4',
+                                                       local_files_only=True,
+                                                       )
+        
+    elif 'llama' in target_model_name and '70' in target_model_name:
+
         large_model = LlamaForCausalLM.from_pretrained(target_model_name, 
                                                        torch_dtype=torch.float16,
                                                        device_map="auto",
                                                        offload_folder="offload",
                                                        trust_remote_code=True,
-                                                       token=hf_token)
+                                                       cache_dir='/local2/ma/cache/huggingface/',
+                                                       _commit_hash='cfe96d938c52db7c6d936f99370c0801b24233c4',
+                                                       local_files_only=True,
+                                                       )
+                                                       #token=hf_token)
+    elif 'llama' in target_model_name:
+        large_model = LlamaForCausalLM.from_pretrained(target_model_name, 
+                                                       torch_dtype=torch.float16,
+                                                       device_map="auto",
+                                                       offload_folder="offload",
+                                                       trust_remote_code=True,
+                                                       token=hf_token,
+                                                       )
+                                                       #token=hf_token)
+
+
     elif 'opt' in target_model_name:
         large_model = OPTForCausalLM .from_pretrained(target_model_name, 
                                                        torch_dtype=torch.float16,
@@ -171,8 +248,8 @@ def evaluate(approx_model_name, target_model_name,
                                                        device_map="auto",
                                                        offload_folder="offload",
                                                        trust_remote_code=True)
-    top_k = 20
-    top_p = 0.9
+    top_k = 10
+    top_p = 0.0
     repeats = 1
     
     if dataset_name == 'cnndm':
@@ -191,6 +268,58 @@ def evaluate(approx_model_name, target_model_name,
             postfix = '[/INST]'
         input_dataset = [tokenizer.encode(prefix + s['article'] + postfix, return_tensors="pt", max_length=512, truncation=True) for s in dataset]
         output_dataset = [[s['highlights']] for s in dataset]
+    elif dataset_name == 'squad':
+        dataset = load_dataset('squad', split='validation')
+        examples = """[INST] <<SYS>> You are a good student. You need to answer the question using the exact words from the context. Below are some examples of how to answer questions based on context<</SYS>>
+Example 1
+Context: Architecturally, the school has a Catholic character. Atop the Main Building's gold dome is a golden statue of the Virgin Mary. Immediately in front of the Main Building and facing it, is a copper statue of Christ with arms upraised with the legend "Venite Ad Me Omnes". Next to the Main Building is the Basilica of the Sacred Heart. Immediately behind the basilica is the Grotto, a Marian place of prayer and reflection. It is a replica of the grotto at Lourdes, France where the Virgin Mary reputedly appeared to Saint Bernadette Soubirous in 1858. At the end of the main drive (and in a direct line that connects through 3 statues and the Gold Dome), is a simple, modern stone statue of Mary.
+Question: To whom did the Virgin Mary allegedly appear in 1858 in Lourdes France?
+Answer: Saint Bernadette Soubirous
+
+Example 2
+Context: The university is the major seat of the Congregation of Holy Cross (albeit not its official headquarters, which are in Rome). Its main seminary, Moreau Seminary, is located on the campus across St. Joseph lake from the Main Building. Old College, the oldest building on campus and located near the shore of St. Mary lake, houses undergraduate seminarians. Retired priests and brothers reside in Fatima House (a former retreat center), Holy Cross House, as well as Columba Hall near the Grotto. The university through the Moreau Seminary has ties to theologian Frederick Buechner. While not Catholic, Buechner has praised writers from Notre Dame and Moreau Seminary created a Buechner Prize for Preaching. 
+Question: What is the primary seminary of the Congregation of the Holy Cross? 
+Answer: Moreau Seminary
+
+Now, answer the following question[/INST]
+"""
+        input_texts = [examples + 
+                       "Context: " + s["context"] + '\n'+
+                       "Question: " + s["question"] + ' \n'+
+                       "Answer:" for s in dataset]
+        input_dataset = [tokenizer.encode(text, return_tensors="pt", max_length=1024, truncation=True) for text in input_texts]
+        output_dataset = [s["answers"]["text"] for s in dataset]
+    elif dataset_name == 'spider':
+        import json
+        dataset = json.load(open("spider/spider/dev.json"))
+        spider_schema,spider_primary,spider_foreign = creatiing_schema("./spider/spider/tables.json")
+
+        examples = """[INST] <<SYS>> You are a SQL expert. You need to write the correct SQL based on the user question and database schemas. Below are some examples <</SYS>>
+Example 1
+Schema:
+Table department, columns = [*,Department_ID,Name,Creation,Ranking,Budget_in_Billions,Num_Employees]
+Table head, columns = [*,head_ID,name,born_state,age]
+Table management, columns = [*,department_ID,head_ID,temporary_acting]
+Foreign_keys = [management.head_ID = head.head_ID,management.department_ID = department.Department_ID]
+Question: "How many heads of the departments are older than 56 ?"
+SQL: SELECT count(*) FROM head WHERE age  >  56; 
+
+Example 2
+Schema:
+Table department, columns = [*,Department_ID,Name,Creation,Ranking,Budget_in_Billions,Num_Employees]
+Table head, columns = [*,head_ID,name,born_state,age]
+Table management, columns = [*,department_ID,head_ID,temporary_acting]
+Foreign_keys = [management.head_ID = head.head_ID,management.department_ID = department.Department_ID]
+Question: "what are the distinct creation years of the departments managed by a secretary born in state 'Alabama'?"
+SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON T1.department_id  =  T2.department_id JOIN head AS T3 ON T2.head_id  =  T3.head_id WHERE T3.born_state  =  'Alabama'; 
+
+"""
+        input_texts = [examples + 
+                       "Schema:\n" + find_fields_MYSQL_like(s["db_id"], spider_schema) + "\n" + 
+                       "Question: " + s["question"] + "\n" + 
+                       "SQL:" for s in dataset]
+        input_dataset = [tokenizer.encode(text, return_tensors="pt", max_length=1024, truncation=True) for text in input_texts]
+        output_dataset = [s["db_id"] + "[SQL]" + s["query"] for s in dataset] 
     elif dataset_name == 'ChatGPT':
         dataset = load_dataset('MohamedRashad/ChatGPT-prompts',split='train')
         input_dataset = [tokenizer.encode(s, return_tensors="pt", max_length=512, truncation=True) for s in dataset['human_prompt']]
@@ -256,11 +385,23 @@ def evaluate(approx_model_name, target_model_name,
     target_model_name = os.path.basename(target_model_name)
 
 
+    rouge = hf_evaluate.load('rouge')
+    if dataset_name == 'squad':
+        em = exact_match_references
+    elif dataset_name == 'spider':
+        em = execution_accuracy_references
+    else:
+        em = None
+
+    ori_output_dataset = output_dataset
     for i in range(repeats):
         #u = length_interval[i]
         u = 100000
         l = 0
         ds = [pt for pt in input_dataset if (pt.size(-1) < u and pt.size(-1) >= l)]
+        ds = [ds[12] for k in range(10)]
+#        output_dataset = ori_output_dataset[:10]
+        output_dataset = [ori_output_dataset[12] for k in range(10)]
 
         print(f'input length {l}-{u}, {len(ds)} data in total')
         total_input_tokens = sum([d.size(1) for d in ds])
@@ -281,6 +422,7 @@ def evaluate(approx_model_name, target_model_name,
         pred_seq = []
         P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
         t1 = time.time()
+        p_list_list = []
         for input_ids in tqdm(ds):
             large_model_cnt += 1
             #if large_model_cnt % 4 == 0:
@@ -290,21 +432,38 @@ def evaluate(approx_model_name, target_model_name,
             t = process_time_ns()
             output = autoregressive_sampling(input_ids, large_model, num_tokens, eos_token_id = tokenizer.eos_token_id, 
                     top_k = top_k, top_p=top_p, pad_token_id = tokenizer.pad_token_id)
+ #           p_list_list.append(p_list)
             total_time += process_time_ns() - t
             total_token += len(output[0]) - input_ids.size(1)
             score = get_score(output, large_model, input_ids.size(1))
             scores.append(score.item())
-            pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+            if dataset_name == 'squad':
+                pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True).split('\n')[0])
+            elif dataset_name == 'spider':
+                pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True).split(';')[0])
+            else:
+                pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+
             if total_time / 1e9 > max_seconds:
                 print(f'terminated at {large_model_cnt}', file=log_f)
                 print(f'terminated at {large_model_cnt}')
                 break
+            
+
+            #print(tokenizer.decode(input_ids.cpu().tolist()[0], skip_special_tokens=True))
+#            print('output')
+#            print(pred_seq[large_model_cnt-1])
+#            print('ansewr')
+#            print(output_dataset[large_model_cnt-1])
+            #xxx = input()
+            
         t2 = time.time()
         P.kill()
         P.wait()
         outputs = P.stdout.readlines()
         fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_large_model.pkl")
         power_total = get_total_power(outputs, t1, t2, fname)
+#        torch.save(p_list_list, 'as_p_list.pth')
 
         print(t1, t2)
 
@@ -317,12 +476,23 @@ def evaluate(approx_model_name, target_model_name,
         time_limit = total_time/1e9/total_token
         quality_limit = np.mean(scores)
 
+        rouge_score = rouge.compute(predictions = pred_seq, references = output_dataset[:large_model_cnt])
+        print(f'rouge score = {rouge_score}')
+        print(f'rouge score = {rouge_score}', file=log_f)
+
+        em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt])
+        print(f'em score = {em_score}')
+        print(f'em score = {em_score}', file=log_f)
+#        print(pred_seq)
+
 
 
 
                 
+        """ 
         # convetional speculative decoding
 #        time.sleep(100)
+        
         total_time = 0
         total_token = 0
         approx_time = 0
@@ -344,7 +514,7 @@ def evaluate(approx_model_name, target_model_name,
         
 
         #print(tokenizer.eos_token_id)
-        #print(tokenizer.pad_token_id)
+        #print(tokenizer.pad_token_id
         
         for input_ids in tqdm(ds):
             cnt += 1
@@ -376,7 +546,13 @@ def evaluate(approx_model_name, target_model_name,
             target_post_prob_time += details['target_post_prob_time']
             score = get_score(output, large_model, input_ids.size(1))
             scores.append(score.item())
-            pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+            if dataset_name == 'squad':
+                pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True).split('\n')[0])
+            elif dataset_name == 'spider':
+                pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True).split(';')[0])
+            else:
+                pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+
             #print(pred_seq[-1])
             #xxx = input()
             if total_time / 1e9 > max_seconds:
@@ -409,6 +585,18 @@ def evaluate(approx_model_name, target_model_name,
         print(f'power/token: {power_total/total_token}', file=log_f)
         print(f'target_model_time: {target_model_time/1e9}, pre cache time: {target_pre_cache_time/1e9}, post prob time: {target_post_prob_time/1e9}')
         print(f'target_model_time: {target_model_time/1e9}, pre cache time: {target_pre_cache_time/1e9}, post prob time: {target_post_prob_time/1e9}', file=log_f)
+        if cnt > large_model_cnt:
+            rouge_score = rouge.compute(predictions = pred_seq[:large_model_cnt], references = output_dataset[:large_model_cnt])
+        else:
+            rouge_score = rouge.compute(predictions = pred_seq[:cnt], references = output_dataset[:cnt])
+
+        print(f'rouge score = {rouge_score}')
+        print(f'rouge score = {rouge_score}', file=log_f)
+        em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt])
+        print(f'em score = {em_score}')
+        print(f'em score = {em_score}', file=log_f)
+
+        """
         
         
         # BiLD speculative decoding
@@ -491,7 +679,7 @@ def evaluate(approx_model_name, target_model_name,
                 print(f'power/token: {power_total/total_token}', file=log_f)
         
         # mjsd speculative decoding
-        if True:
+        if False:
             for params in multi_params:
                 if len(params) == 2:
                     gamma, width = params[0], params[1]
@@ -577,6 +765,13 @@ def evaluate(approx_model_name, target_model_name,
                 print(f'total power consumption: {power_total}', file=log_f)
                 print(f'power/token: {power_total/total_token}')
                 print(f'power/token: {power_total/total_token}', file=log_f)
+                if cnt > large_model_cnt:
+                    rouge_score = rouge.compute(predictions = pred_seq[:large_model_cnt], references = output_dataset[:large_model_cnt])
+                else:
+                    rouge_score = rouge.compute(predictions = pred_seq[:cnt], references = output_dataset[:cnt])
+                print(f'rouge score = {rouge_score}')
+                print(f'rouge score = {rouge_score}', file=log_f)
+
 
        
         # iid beam speculative decoding
@@ -666,8 +861,8 @@ def evaluate(approx_model_name, target_model_name,
                 print(f'power/token: {power_total/total_token}', file=log_f)
 
    
-        for width in [2,3,4]:
-            for gamma in [2,3,4,6]:
+        for width in [3]:
+            for gamma in [3,4]:
 
 #        if True:
 #            for gamma, width in multi_params:
@@ -690,7 +885,7 @@ def evaluate(approx_model_name, target_model_name,
                 P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
                 t1 = time.time()
 
-
+                total_counts = {1.:0, 12.:0}
                 for input_ids in tqdm(ds):
                     cnt += 1
                     #if cnt % 16 == 0:
@@ -706,6 +901,12 @@ def evaluate(approx_model_name, target_model_name,
                       gamma = gamma, width=width, num_beams = num_beams,
                       top_k = top_k, top_p=top_p, 
                       random_seed = random_seed, details=True)
+#                    val, counts = output[0,input_ids.size(1):].unique(return_counts=True)
+#                    print(output[0,input_ids.size(1):])
+                #    xxx = input()
+#                    print(val, counts)
+#                    for v,c in zip(val,counts):
+#                        total_counts[float(v)] += c
                     #print(output)
                     #print(input_ids)
 
@@ -726,7 +927,13 @@ def evaluate(approx_model_name, target_model_name,
                         raise RuntimeError('score nan')
                     #    xxx = input()
                     scores.append(score.item())
-                    pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+                    if dataset_name == 'squad':
+                        pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True).split('\n')[0])
+                    elif dataset_name == 'spider':
+                        pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True).split(';')[0])
+                    else:
+                        pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+
                     if total_time / 1e9 > max_seconds:
                         print(f'terminated at {cnt}', file=log_f)
                         print(f'terminated at {cnt}')
@@ -738,6 +945,8 @@ def evaluate(approx_model_name, target_model_name,
                 outputs = P.stdout.readlines()
                 fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_true_beam_{gamma}_{width}.pkl")
                 power_total = get_total_power(outputs, t1, t2, fname)
+ #               print(total_counts)
+ #               xxx = input()
 
 
                 print(f'\n true beam speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
@@ -755,11 +964,26 @@ def evaluate(approx_model_name, target_model_name,
                 print(f'total power consumption: {power_total}', file=log_f)
                 print(f'power/token: {power_total/total_token}')
                 print(f'power/token: {power_total/total_token}', file=log_f)
+                if cnt > large_model_cnt:
+                    rouge_score = rouge.compute(predictions = pred_seq[:large_model_cnt], references = output_dataset[:large_model_cnt])
+                    em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt], debug = False)
+                else:
+                    rouge_score = rouge.compute(predictions = pred_seq[:cnt], references = output_dataset[:cnt])
+                    em_score = em(predictions = pred_seq[:cnt], references = output_dataset[:cnt], debug = False)
 
-        for max_beams in [2,3]:
+                print(f'rouge score = {rouge_score}')
+                print(f'rouge score = {rouge_score}', file=log_f)
+                print(f'em score = {em_score}')
+                print(f'em score = {em_score}', file=log_f)
+
+
+
+        for max_beams in [3,4]:
             for min_beams in [1,2,3]:
                 if min_beams > max_beams:
-                    continue
+                    break
+                if min_beams > 1:
+                    break
                 total_time = 0
                 total_token = 0
                 approx_time = 0
@@ -775,7 +999,8 @@ def evaluate(approx_model_name, target_model_name,
                 cnt = 0
                 P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
                 t1 = time.time()
-
+                p_list_list = []
+                total_counts = {1.:0, 12.:0}
                 for input_ids in tqdm(ds):
                     cnt += 1
                     #if cnt % 16 == 0:
@@ -789,19 +1014,42 @@ def evaluate(approx_model_name, target_model_name,
                         max_num_beams = max_beams, min_num_beams = min_beams,
                         eos_token_id = tokenizer.eos_token_id, 
                         top_k = top_k, top_p=top_p, pad_token_id = tokenizer.pad_token_id)
+                #    p_list_list.append(p_list)
+#                    val, counts = output[0,input_ids.size(1):].unique(return_counts=True)
+#                    for v,c in zip(val,counts):
+#                        total_counts[float(v)] += c
+
 
                     total_time += process_time_ns() - t
                     total_token += len(output[0])- input_ids.size(1)
                     score = get_score(output, large_model, input_ids.size(1))
                     scores.append(score.item())
-                    pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
 
+                    if dataset_name == 'squad':
+                        pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True).split('\n')[0])
+                    elif dataset_name == 'spider':
+                        pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True).split(';')[0])
+                    else:
+                        pred_seq.append(tokenizer.decode(output[0][input_ids.size(1):], skip_special_tokens=True))
+
+                    """
+                    print(tokenizer.decode(input_ids.cpu().tolist()[0], skip_special_tokens=True))
+                    print('output')
+                    print(pred_seq[cnt-1])
+                    print('ansewr')
+                    print(output_dataset[cnt-1])
+                    print(rouge.compute(predictions=pred_seq[-1:], references = output_dataset[cnt-1:cnt]))
+                    xxx = input()
+                    """
                     if total_time / 1e9 > max_seconds:
                         print(f'terminated at {cnt}', file=log_f)
                         print(f'terminated at {cnt}')
                         break
+#                print(total_counts)
+#                xxx = input()
 
                 t2 = time.time()
+   #             torch.save(p_list_list, 'rb_p_list.pth')
                 P.kill()
                 P.wait()
                 outputs = P.stdout.readlines()
@@ -819,6 +1067,20 @@ def evaluate(approx_model_name, target_model_name,
                 print(f'total power consumption: {power_total}', file=log_f)
                 print(f'power/token: {power_total/total_token}')
                 print(f'power/token: {power_total/total_token}', file=log_f)
+
+                if cnt > large_model_cnt:
+                    rouge_score = rouge.compute(predictions = pred_seq[:large_model_cnt], references = output_dataset[:large_model_cnt])
+                    em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt])
+                else:
+                    rouge_score = rouge.compute(predictions = pred_seq[:cnt], references = output_dataset[:cnt])
+                    em_score = em(predictions = pred_seq[:cnt], references = output_dataset[:cnt])
+
+                print(f'rouge score = {rouge_score}')
+                print(f'rouge score = {rouge_score}', file=log_f)
+
+                print(f'em score = {em_score}')
+                print(f'em score = {em_score}', file=log_f)
+   #             print(pred_seq)
 
 
 
