@@ -180,7 +180,7 @@ def evaluate(approx_model_name, target_model_name,
     print(f"begin loading models: \n {approx_model_name} \n {target_model_name}")
     if 'llama' in approx_model_name and 'GPTQ' not in approx_model_name:
         small_model = LlamaForCausalLM.from_pretrained(approx_model_name, 
-                                                       torch_dtype=torch.float16,
+                                                       torch_dtype=torch.float32,
                                                        device_map="auto",
                                                        trust_remote_code=True,
                                                        token=hf_token)
@@ -224,7 +224,7 @@ def evaluate(approx_model_name, target_model_name,
                                                        #token=hf_token)
     elif 'llama' in target_model_name:
         large_model = LlamaForCausalLM.from_pretrained(target_model_name, 
-                                                       torch_dtype=torch.float16,
+                                                       torch_dtype=torch.float32,
                                                        device_map="auto",
                                                        offload_folder="offload",
                                                        trust_remote_code=True,
@@ -399,9 +399,10 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
         u = 100000
         l = 0
         ds = [pt for pt in input_dataset if (pt.size(-1) < u and pt.size(-1) >= l)]
-        ds = [ds[12] for k in range(10)]
-#        output_dataset = ori_output_dataset[:10]
-        output_dataset = [ori_output_dataset[12] for k in range(10)]
+#        ds = [ds[12] for k in range(100)]
+        ds = ds[:100]
+        output_dataset = ori_output_dataset[:100]
+#        output_dataset = [ori_output_dataset[12] for k in range(100)]
 
         print(f'input length {l}-{u}, {len(ds)} data in total')
         total_input_tokens = sum([d.size(1) for d in ds])
@@ -862,7 +863,7 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
 
    
         for width in [3]:
-            for gamma in [3,4]:
+            for gamma in [1,2]:
 
 #        if True:
 #            for gamma, width in multi_params:
@@ -898,7 +899,7 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                     output, details = beam_speculative_sampling(input_ids, small_model, large_model, 
                       eos_token_id = tokenizer.eos_token_id,
                       pad_token_id = tokenizer.pad_token_id, max_len = num_tokens, 
-                      gamma = gamma, width=width, num_beams = num_beams,
+                      gamma = 4, width=width, num_beams = num_beams, min_num_beams = gamma,
                       top_k = top_k, top_p=top_p, 
                       random_seed = random_seed, details=True)
 #                    val, counts = output[0,input_ids.size(1):].unique(return_counts=True)
@@ -978,7 +979,7 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
 
 
 
-        for max_beams in [3,4]:
+        for max_beams in [1,3,4]:
             for min_beams in [1,2,3]:
                 if min_beams > max_beams:
                     break

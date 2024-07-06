@@ -73,7 +73,7 @@ class KVCacheModel():
 #                self._prob_history[:, i, :] = float('-inf')
 #                self._prob_history[:, i, 1] = np.log(0.4)
 #                self._prob_history[:, i, 12] = np.log(0.6)
-                self._prob_history[:, i, :] = norm_logits(self._prob_history[:, i, :], self._temperature, self._top_k, self._top_p)
+                self._prob_history[:, i, :] = norm_logits(self._prob_history[:, i, :], 1, None, None)
             self._past_key_values = outputs.past_key_values
             self.forward_time_dict['norm_prob_time'] += process_time_ns() - tt
         else:
@@ -120,7 +120,7 @@ class KVCacheModel():
 #                not_cached_q[:, i, :] = float('-inf')
 #                not_cached_q[:, i, 1] = np.log(0.4)
 #                not_cached_q[:, i, 12] = np.log(0.6)
-                not_cached_q[:, i, :] = norm_logits(not_cached_q[:, i, :], self._temperature, self._top_k, self._top_p)    
+                not_cached_q[:, i, :] = norm_logits(not_cached_q[:, i, :], 1, None, None)    
             self._prob_history = torch.cat([self._prob_history, not_cached_q], dim=1)
             
             self._past_key_values = outputs.past_key_values

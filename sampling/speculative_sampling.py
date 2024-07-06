@@ -17,7 +17,7 @@ from collections import Counter
 @torch.no_grad()
 def beam_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.Module, target_model : torch.nn.Module, 
                          eos_token_id, pad_token_id, max_len : int , gamma : int = 4, width : int = 8, 
-                         num_beams: int = 8, min_num_beams: int = 1, extra_sample_cnt: int = 1,
+                         num_beams: int = 8, min_num_beams: int = 1, extra_sample_cnt: int = -1,
                          temperature : float = 1, top_k : int = 0, top_p : float = 0, verbose : bool = False, random_seed : int = None,
                          details : bool = False, debug_dict = None) -> torch.Tensor:
 
@@ -74,6 +74,7 @@ def beam_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.
     candidates = []
     acc_sample_list = []
     extra_sample_list = []
+    expect_cnt_list = []
 
     try:
         while output_prefix.shape[1] < T:
@@ -156,15 +157,14 @@ def beam_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.
                 end = start + num_beams
                 cur_p = p[start:end]
                 err = torch.sum(torch.abs(cur_p - gt_p[start:end, prefix_len+i-1].squeeze()))
-                print(err)
+#                print(err)
                 if err > 0.01:
                     print(start,end,prefix_len+i-1)
                     print(err)
                     print(torch.sum(torch.abs(cur_p - gt_p[start:end, prefix_len+i-1].squeeze()), dim=-1))
-                    xxx = input()
+                    xxx = input('error too large')
                 start += num_beams
-            """ 
-            
+            """
 
             vocab_size = p.size(-1)
             
@@ -228,7 +228,8 @@ def beam_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.
 
                 #print(from_valid_beam)
                 p_next_token_scores = beam_scores[cur_valid_beam][:,None].expand_as(cur_p) + cur_p.log()
-                p_next_token_scores = torch.softmax(p_next_token_scores.view(-1), dim=0)
+#                p_next_token_scores = torch.softmax(p_next_token_scores.view(-1), dim=0)
+                p_next_token_scores = norm_logits(p_next_token_scores.view(1,-1), temperature, top_k, top_p).view(-1) 
 
                 #p_next_token_scores[:] = 0
                 #t = 0
@@ -257,7 +258,9 @@ def beam_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.
 
                     expect_cnt = torch.sum(valid_beam_cnt * q_prob * torch.clamp(p_next_token_scores/(q_prob+1e-6), 
                                   max=1)).floor().item()
-                    expect_cnt = max(expect_cnt, 1)
+                    expect_cnt = max(expect_cnt, min_num_beams)
+                    #expect_cnt = 1
+                    expect_cnt_list.append(expect_cnt)
                     #expect_cnt = 1
 
 
@@ -352,7 +355,6 @@ def beam_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.
                 p_next_token_scores = beam_scores[cur_valid_beam][:,None].expand_as(cur_p) + cur_p.log()
                 op = p_next_token_scores 
                 p_next_token_scores = norm_logits(p_next_token_scores.view(1,-1), temperature = temperature, top_k = top_k, top_p = top_p).squeeze()
-                p_next_token_scores = p_next_token_scores.exp()
 #                p_next_token_scores[:] = 0
 #                p_next_token_scores[1] = 0.4
 #                p_next_token_scores[12] = 0.6
@@ -397,7 +399,6 @@ def beam_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.
 
                 #print(output_prefix.size(), token.size())
                 output_prefix = torch.concat([output_prefix, token], dim=1)
- #               debug_target_model_cache.rollback(n+2, choice)
                 accepted_input_idx = acc_pos[:,0]
                 accepted_mask = extra_att_mask[acc_pos[:,0], acc_pos[:,1]]
                 target_model_cache.rollback_tree_attention(accepted_input_idx.to(target_model.device), accepted_mask)
@@ -471,19 +472,18 @@ def beam_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.
                 #print(output_prefix.size(), token.size())
                 output_prefix = torch.concat([output_prefix, token], dim=1)
                 target_model_cache.rollback_tree_attention(accepted_input_idx, accepted_mask)
-
+                #debug_target_model_cache._past_key_values = None
                 """for debugging"""
             #beam_scores[:] = 0
           #      if token != 1 and token != 12:
           #          print('extra sample error')
           #          print(cur_p_prob.nonzero())
           #          xxx = input()
-            extra_sample_list.append(token.item())
+#            extra_sample_list.append(token.item())
 
 
 
  #               debug_target_model_cache.rollback(n+1, choice)
-                #debug_target_model_cache._past_key_values = None
 
             if max_l == inc_len:
                 last_beam_idx = all_beam_idx[-1] 
@@ -554,6 +554,7 @@ def beam_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.
 
     #print('acc counter',Counter(acc_sample_list))
     #print('extra counter',Counter(extra_sample_list))
+#    print('average expect cnt', np.mean(expect_cnt_list))
     if verbose:
         print('approx model time', approx_time/1e9)
         print('target model time', target_time/1e9)
