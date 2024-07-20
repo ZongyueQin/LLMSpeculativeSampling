@@ -16,6 +16,8 @@ from sampling import BiLD_sampling
 from sampling import random_width_beam_sampling
 from sampling.models.modeling_llama import LlamaForCausalLM
 from sampling.models.modeling_opt import OPTForCausalLM
+#from transformers import LlamaForCausalLM
+#from transformers import OPTForCausalLM
 from sampling.utils import exact_match_references, execution_accuracy_references 
 
 from globals import Decoder
@@ -180,7 +182,7 @@ def evaluate(approx_model_name, target_model_name,
     print(f"begin loading models: \n {approx_model_name} \n {target_model_name}")
     if 'llama' in approx_model_name and 'GPTQ' not in approx_model_name:
         small_model = LlamaForCausalLM.from_pretrained(approx_model_name, 
-                                                       torch_dtype=torch.float32,
+                                                       torch_dtype=torch.float16,
                                                        device_map="auto",
                                                        trust_remote_code=True,
                                                        token=hf_token)
@@ -224,7 +226,7 @@ def evaluate(approx_model_name, target_model_name,
                                                        #token=hf_token)
     elif 'llama' in target_model_name:
         large_model = LlamaForCausalLM.from_pretrained(target_model_name, 
-                                                       torch_dtype=torch.float32,
+                                                       torch_dtype=torch.float16,
                                                        device_map="auto",
                                                        offload_folder="offload",
                                                        trust_remote_code=True,
@@ -248,9 +250,9 @@ def evaluate(approx_model_name, target_model_name,
                                                        device_map="auto",
                                                        offload_folder="offload",
                                                        trust_remote_code=True)
-    top_k = 10
-    top_p = 0.0
-    repeats = 1
+    top_k = 20
+    top_p = 0.9
+    repeats = 4
     
     if dataset_name == 'cnndm':
         dataset = load_dataset('cnn_dailymail', '3.0.0', split='test')
@@ -481,16 +483,17 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
         print(f'rouge score = {rouge_score}')
         print(f'rouge score = {rouge_score}', file=log_f)
 
-        em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt])
-        print(f'em score = {em_score}')
-        print(f'em score = {em_score}', file=log_f)
+        if em is not None:
+            em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt])
+            print(f'em score = {em_score}')
+            print(f'em score = {em_score}', file=log_f)
 #        print(pred_seq)
 
 
 
 
                 
-        """ 
+         
         # convetional speculative decoding
 #        time.sleep(100)
         
@@ -593,11 +596,12 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
 
         print(f'rouge score = {rouge_score}')
         print(f'rouge score = {rouge_score}', file=log_f)
-        em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt])
-        print(f'em score = {em_score}')
-        print(f'em score = {em_score}', file=log_f)
+        if em is not None:
+            em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt])
+            print(f'em score = {em_score}')
+            print(f'em score = {em_score}', file=log_f)
 
-        """
+        
         
         
         # BiLD speculative decoding
@@ -680,7 +684,7 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                 print(f'power/token: {power_total/total_token}', file=log_f)
         
         # mjsd speculative decoding
-        if False:
+        if True:
             for params in multi_params:
                 if len(params) == 2:
                     gamma, width = params[0], params[1]
@@ -862,8 +866,10 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                 print(f'power/token: {power_total/total_token}', file=log_f)
 
    
-        for width in [3]:
-            for gamma in [1,2]:
+        for width in [3,4,5]:
+          break
+          for min_num_beams in [1,2,3]:
+            for gamma in [3,4]:
 
 #        if True:
 #            for gamma, width in multi_params:
@@ -899,7 +905,7 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                     output, details = beam_speculative_sampling(input_ids, small_model, large_model, 
                       eos_token_id = tokenizer.eos_token_id,
                       pad_token_id = tokenizer.pad_token_id, max_len = num_tokens, 
-                      gamma = 4, width=width, num_beams = num_beams, min_num_beams = gamma,
+                      gamma = gamma, width=width, num_beams = num_beams, min_num_beams = min_num_beams,
                       top_k = top_k, top_p=top_p, 
                       random_seed = random_seed, details=True)
 #                    val, counts = output[0,input_ids.size(1):].unique(return_counts=True)
@@ -980,6 +986,7 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
 
 
         for max_beams in [1,3,4]:
+            break
             for min_beams in [1,2,3]:
                 if min_beams > max_beams:
                     break

@@ -6,6 +6,7 @@ import torch.nn.functional as F
 
 from sampling.kvcache_model import KVCacheModel
 from sampling.utils import norm_logits, sample, max_fn
+from sampling.utils import get_num_acc_prob
 from globals import Decoder
 from time import process_time_ns
 import numpy as np
@@ -256,8 +257,16 @@ def beam_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.
                     valid_beam_cnt = from_valid_beam.float().sum()
 
 
-                    expect_cnt = torch.sum(valid_beam_cnt * q_prob * torch.clamp(p_next_token_scores/(q_prob+1e-6), 
-                                  max=1)).floor().item()
+                    #expect_cnt = torch.sum(valid_beam_cnt * q_prob * torch.clamp(p_next_token_scores/(q_prob+1e-6), 
+                    #              max=1)).floor().item()
+                    p_width, e_width = get_num_acc_prob(p_next_token_scores, 
+                                                        q_prob,
+                                                        num_beams,
+                                                        # use num beams because q_score 
+                                                        # is not normalized after
+                                                        # selection
+                                                        )
+                    expect_cnt = torch.multinomial(p_width, 1)
                     expect_cnt = max(expect_cnt, min_num_beams)
                     #expect_cnt = 1
                     expect_cnt_list.append(expect_cnt)
@@ -1175,7 +1184,8 @@ def mjsd_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                        return_dict_in_generate = True,
                        output_scores = True,
                        encoder_outputs = encoder_outputs,
-                       ret_seq_scores = True
+                       ret_seq_scores = True,
+                       optimization = True,
                        )
             else:
                 out = approx_model_cache.beam_sample_with_kv_cache(
@@ -1186,7 +1196,8 @@ def mjsd_speculative_sampling(prefix : torch.Tensor, approx_model : torch.nn.Mod
                        num_return_sequences=width,
                        return_dict_in_generate = True,
                        output_scores = True,
-                       ret_seq_scores = True
+                       ret_seq_scores = True,
+                       optimization = True,
                        )
 
 

@@ -73,7 +73,9 @@ class KVCacheModel():
 #                self._prob_history[:, i, :] = float('-inf')
 #                self._prob_history[:, i, 1] = np.log(0.4)
 #                self._prob_history[:, i, 12] = np.log(0.6)
-                self._prob_history[:, i, :] = norm_logits(self._prob_history[:, i, :], 1, None, None)
+#                self._prob_history[:, i, :] = norm_logits(self._prob_history[:, i, :], 1, None, None)
+                self._prob_history[:, i, :] = norm_logits(self._prob_history[:, i, :], self._temperature, self._top_k, self._top_p)
+
             self._past_key_values = outputs.past_key_values
             self.forward_time_dict['norm_prob_time'] += process_time_ns() - tt
         else:
@@ -120,7 +122,9 @@ class KVCacheModel():
 #                not_cached_q[:, i, :] = float('-inf')
 #                not_cached_q[:, i, 1] = np.log(0.4)
 #                not_cached_q[:, i, 12] = np.log(0.6)
-                not_cached_q[:, i, :] = norm_logits(not_cached_q[:, i, :], 1, None, None)    
+#                not_cached_q[:, i, :] = norm_logits(not_cached_q[:, i, :], 1, None, None)    
+                not_cached_q[:, i, :] = norm_logits(not_cached_q[:, i, :], self._temperature, self._top_k, self._top_p)
+
             self._prob_history = torch.cat([self._prob_history, not_cached_q], dim=1)
             
             self._past_key_values = outputs.past_key_values
@@ -444,6 +448,7 @@ class KVCacheModel():
             acc_rate_thres = 0.4,
             ret_seq_scores = False,
             return_intermediate_results = False,
+            optimization = False,
             **kwargs
             ):
         """ forward the model gamma times
@@ -555,6 +560,7 @@ class KVCacheModel():
                                 acc_rate_thres = acc_rate_thres,
                                 ret_seq_scores = ret_seq_scores,
                                 return_intermediate_results = return_intermediate_results,
+                                optimization = optimization,
                                 **model_kwargs,
                                 )
 
@@ -581,6 +587,7 @@ class KVCacheModel():
         acc_rate_thres = 0.4,
         ret_seq_scores = False,
         return_intermediate_results = False,
+        optimization = False,
         **model_kwargs,
     ): 
         self.beam_past_key_values = []
@@ -704,6 +711,7 @@ class KVCacheModel():
                     model_kwargs["past_key_values"] = None
                     model_kwargs['use_cache'] = True
                     model_inputs = self._model.prepare_inputs_for_generation(input_ids, **model_kwargs)
+                    """
                     print(input_ids.size())
                     print(last_input_ids.size())
                     print(cached_len)
@@ -716,7 +724,7 @@ class KVCacheModel():
                       output_attentions=output_attentions,
                       output_hidden_states=output_hidden_states,
                     )
-                
+                    """
 
                 model_kwargs["past_key_values"] = self._past_key_values
                 model_kwargs['use_cache'] = True
@@ -728,10 +736,10 @@ class KVCacheModel():
                 else:
                     model_inputs['decoder_input_ids'] = last_input_ids
 
-                if self.beam_rollback_flag == True:
-                    print(debug_outputs.past_key_values[0][0].size())
-                    print(model_inputs['input_ids'].size())
-                    print(model_inputs['past_key_values'][0][0].size())
+                #if self.beam_rollback_flag == True:
+                #    print(debug_outputs.past_key_values[0][0].size())
+                #    print(model_inputs['input_ids'].size())
+                #    print(model_inputs['past_key_values'][0][0].size())
               
                 assert model_inputs['use_cache'] == True
 
@@ -741,7 +749,7 @@ class KVCacheModel():
                     output_attentions=output_attentions,
                     output_hidden_states=output_hidden_states,
                 )
-                
+                """ 
                 if self.beam_rollback_flag == True:
                     diff = 0
                     for values, debug_values in zip(outputs.past_key_values, debug_outputs.past_key_values):
@@ -758,6 +766,7 @@ class KVCacheModel():
                                 print(d_val[mask])
                                 xxx = input('d_val')
                     print(diff)
+                """
                 
 
             self.beam_past_key_values.append(outputs.past_key_values)
@@ -806,11 +815,12 @@ class KVCacheModel():
             probs = nn.functional.softmax(next_token_scores, dim=-1)
             
             #  add alternative sort criterion based on predicted acceptance rate
-            """
-            next_tokens = torch.multinomial(probs, num_samples=2 * num_beams)
-            """
+            if optimization == True:
+            #    next_tokens = torch.multinomial(probs, num_samples=2 * num_beams)
+                next_tokens = sample(probs, 2*num_beams)
+            else: 
 #            next_tokens = torch.multinomial(probs, num_samples=num_beams, replacement=True)
-            next_tokens = sample(probs, num_beams)
+                next_tokens = sample(probs, num_beams)
 
             next_token_scores = torch.gather(next_token_scores, -1, next_tokens)
             """
@@ -823,34 +833,34 @@ class KVCacheModel():
                 print(tmp.nonzero().numel())
                 #xxx = input()
             """
-            #next_token_scores, _indices = torch.sort(next_token_scores, descending=True, dim=1)
-            #next_tokens = torch.gather(next_tokens, -1, _indices)
+            if optimization == True:
+                next_indices = torch.div(next_tokens, vocab_size, rounding_mode="floor")
+                next_tokens = next_tokens % vocab_size
+                next_token_scores = torch.clamp(next_token_scores, min=-1e10)
+                next_token_scores, _indices = torch.sort(next_token_scores, descending=True, dim=1)
+                next_tokens = torch.gather(next_tokens, -1, _indices)
+                # stateless
+                # I suspect beam_scorer warp the sampling probability, so I remove it to see the outcome
+                beam_outputs = beam_scorer.process(
+                  input_ids,
+                  next_token_scores,
+                  next_tokens,
+                  next_indices,
+                  pad_token_id=pad_token_id,
+                  eos_token_id=eos_token_id,
+                  beam_indices=beam_indices,
+                )
+                beam_scores = beam_outputs["next_beam_scores"]
+                beam_next_tokens = beam_outputs["next_beam_tokens"]
+                beam_idx = beam_outputs["next_beam_indices"]
 
-            next_indices = torch.div(next_tokens, vocab_size, rounding_mode="floor")
-            next_tokens = next_tokens % vocab_size
-            next_token_scores = torch.clamp(next_token_scores, min=-1e10)
-            """    
-            # stateless
-            # I suspect beam_scorer warp the sampling probability, so I remove it to see the outcome
-            beam_outputs = beam_scorer.process(
-                input_ids,
-                next_token_scores,
-                next_tokens,
-                next_indices,
-                pad_token_id=pad_token_id,
-                eos_token_id=eos_token_id,
-                beam_indices=beam_indices,
-            )
-            beam_scores = beam_outputs["next_beam_scores"]
-            beam_next_tokens = beam_outputs["next_beam_tokens"]
-            beam_idx = beam_outputs["next_beam_indices"]
-            print(beam_scores.size())
-            print(beam_next_tokens.size())
-            print(beam_idx.size())
-            """
-            beam_scores = next_token_scores.squeeze()
-            beam_next_tokens = next_tokens.squeeze()
-            beam_idx = next_indices.squeeze()
+            else:
+                next_indices = torch.div(next_tokens, vocab_size, rounding_mode="floor")
+                next_tokens = next_tokens % vocab_size
+                next_token_scores = torch.clamp(next_token_scores, min=-1e10)
+                beam_scores = next_token_scores.squeeze()
+                beam_next_tokens = next_tokens.squeeze()
+                beam_idx = next_indices.squeeze()
             #print(beam_scores.size())
             #print(beam_next_tokens.size())
             #print(beam_idx.size())
