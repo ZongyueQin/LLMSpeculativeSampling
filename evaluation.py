@@ -180,7 +180,7 @@ def evaluate(approx_model_name, target_model_name,
     print(f"begin loading models: \n {approx_model_name} \n {target_model_name}")
     if 'llama' in approx_model_name and 'GPTQ' not in approx_model_name:
         small_model = LlamaForCausalLM.from_pretrained(approx_model_name, 
-                                                       torch_dtype=torch.float32,
+                                                       torch_dtype=torch.float16,
                                                        device_map="auto",
                                                        trust_remote_code=True,
                                                        token=hf_token)
@@ -224,7 +224,7 @@ def evaluate(approx_model_name, target_model_name,
                                                        #token=hf_token)
     elif 'llama' in target_model_name:
         large_model = LlamaForCausalLM.from_pretrained(target_model_name, 
-                                                       torch_dtype=torch.float32,
+                                                       torch_dtype=torch.float16,
                                                        device_map="auto",
                                                        offload_folder="offload",
                                                        trust_remote_code=True,
@@ -250,7 +250,7 @@ def evaluate(approx_model_name, target_model_name,
                                                        trust_remote_code=True)
     top_k = 10
     top_p = 0.0
-    repeats = 1
+    repeats = 2
     
     if dataset_name == 'cnndm':
         dataset = load_dataset('cnn_dailymail', '3.0.0', split='test')
@@ -270,16 +270,11 @@ def evaluate(approx_model_name, target_model_name,
         output_dataset = [[s['highlights']] for s in dataset]
     elif dataset_name == 'squad':
         dataset = load_dataset('squad', split='validation')
-        examples = """[INST] <<SYS>> You are a good student. You need to answer the question using the exact words from the context. Below are some examples of how to answer questions based on context<</SYS>>
+        examples = """[INST] <<SYS>> You need to answer the question using the exact words from the context. Below are some examples of how to answer questions based on context<</SYS>>
 Example 1
-Context: Architecturally, the school has a Catholic character. Atop the Main Building's gold dome is a golden statue of the Virgin Mary. Immediately in front of the Main Building and facing it, is a copper statue of Christ with arms upraised with the legend "Venite Ad Me Omnes". Next to the Main Building is the Basilica of the Sacred Heart. Immediately behind the basilica is the Grotto, a Marian place of prayer and reflection. It is a replica of the grotto at Lourdes, France where the Virgin Mary reputedly appeared to Saint Bernadette Soubirous in 1858. At the end of the main drive (and in a direct line that connects through 3 statues and the Gold Dome), is a simple, modern stone statue of Mary.
+Context: Architecturally, the school has a Catholic character. Atop the Main Building's gold dome is a golden statue of the Virgin Mary. Immediately in front of the Main Building and facing it, is a copper statue of Christ with arms upraised with the legend "Venite Ad Me Omnes". Next to the Main Building is the Basilica of the Sacred Heart. Immediately behind the basilica is the Grotto, a Marian place of prayer and reflection. It is a replica of the grotto at Lourdes, France where the Virgin Mary reputedly appeared to Saint Bernadette Soubirous in 1858. 
 Question: To whom did the Virgin Mary allegedly appear in 1858 in Lourdes France?
 Answer: Saint Bernadette Soubirous
-
-Example 2
-Context: The university is the major seat of the Congregation of Holy Cross (albeit not its official headquarters, which are in Rome). Its main seminary, Moreau Seminary, is located on the campus across St. Joseph lake from the Main Building. Old College, the oldest building on campus and located near the shore of St. Mary lake, houses undergraduate seminarians. Retired priests and brothers reside in Fatima House (a former retreat center), Holy Cross House, as well as Columba Hall near the Grotto. The university through the Moreau Seminary has ties to theologian Frederick Buechner. While not Catholic, Buechner has praised writers from Notre Dame and Moreau Seminary created a Buechner Prize for Preaching. 
-Question: What is the primary seminary of the Congregation of the Holy Cross? 
-Answer: Moreau Seminary
 
 Now, answer the following question[/INST]
 """
@@ -287,7 +282,7 @@ Now, answer the following question[/INST]
                        "Context: " + s["context"] + '\n'+
                        "Question: " + s["question"] + ' \n'+
                        "Answer:" for s in dataset]
-        input_dataset = [tokenizer.encode(text, return_tensors="pt", max_length=1024, truncation=True) for text in input_texts]
+        input_dataset = [tokenizer.encode(text, return_tensors="pt", max_length=512, truncation=True) for text in input_texts]
         output_dataset = [s["answers"]["text"] for s in dataset]
     elif dataset_name == 'spider':
         import json
@@ -400,8 +395,8 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
         l = 0
         ds = [pt for pt in input_dataset if (pt.size(-1) < u and pt.size(-1) >= l)]
 #        ds = [ds[12] for k in range(100)]
-        ds = ds[:100]
-        output_dataset = ori_output_dataset[:100]
+        ds = ds[:500]
+        output_dataset = ori_output_dataset[:500]
 #        output_dataset = [ori_output_dataset[12] for k in range(100)]
 
         print(f'input length {l}-{u}, {len(ds)} data in total')
@@ -481,16 +476,17 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
         print(f'rouge score = {rouge_score}')
         print(f'rouge score = {rouge_score}', file=log_f)
 
-        em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt])
-        print(f'em score = {em_score}')
-        print(f'em score = {em_score}', file=log_f)
+        if em is not None:
+            em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt])
+            print(f'em score = {em_score}')
+            print(f'em score = {em_score}', file=log_f)
 #        print(pred_seq)
 
 
 
 
                 
-        """ 
+         
         # convetional speculative decoding
 #        time.sleep(100)
         
@@ -593,11 +589,12 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
 
         print(f'rouge score = {rouge_score}')
         print(f'rouge score = {rouge_score}', file=log_f)
-        em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt])
-        print(f'em score = {em_score}')
-        print(f'em score = {em_score}', file=log_f)
+        if em is not None:
+            em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt])
+            print(f'em score = {em_score}')
+            print(f'em score = {em_score}', file=log_f)
 
-        """
+        
         
         
         # BiLD speculative decoding
@@ -862,7 +859,8 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                 print(f'power/token: {power_total/total_token}', file=log_f)
 
    
-        for width in [3]:
+        for width in [3,4,5]:
+          for extra_sample_cnt in [1,-1]:
             for gamma in [1,2]:
 
 #        if True:
@@ -885,6 +883,7 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                 cnt = 0
                 P = subprocess.Popen("exec python3 -u gpu_power_monitor.py",shell=True, text=True, stdout=subprocess.PIPE)
                 t1 = time.time()
+                expect_cnt_list = []
 
                 total_counts = {1.:0, 12.:0}
                 for input_ids in tqdm(ds):
@@ -900,6 +899,7 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                       eos_token_id = tokenizer.eos_token_id,
                       pad_token_id = tokenizer.pad_token_id, max_len = num_tokens, 
                       gamma = 4, width=width, num_beams = num_beams, min_num_beams = gamma,
+                      extra_sample_cnt = extra_sample_cnt,
                       top_k = top_k, top_p=top_p, 
                       random_seed = random_seed, details=True)
 #                    val, counts = output[0,input_ids.size(1):].unique(return_counts=True)
@@ -920,6 +920,7 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                     acc_rate.append(details['acc_rate'])
                     target_times += details['target_call_times']
                     approx_times += details['approx_call_times']
+                    expect_cnt_list += details['expect_cnt_list']
                     score = get_score(output, large_model, input_ids.size(1))
                     if score.isnan().any():
                         print(input_ids)
@@ -965,21 +966,26 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                 print(f'total power consumption: {power_total}', file=log_f)
                 print(f'power/token: {power_total/total_token}')
                 print(f'power/token: {power_total/total_token}', file=log_f)
+                em_score = None
                 if cnt > large_model_cnt:
                     rouge_score = rouge.compute(predictions = pred_seq[:large_model_cnt], references = output_dataset[:large_model_cnt])
-                    em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt], debug = False)
+                    if em is not None:
+                        em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt], debug = False)
                 else:
                     rouge_score = rouge.compute(predictions = pred_seq[:cnt], references = output_dataset[:cnt])
-                    em_score = em(predictions = pred_seq[:cnt], references = output_dataset[:cnt], debug = False)
+                    if em is not None:
+                        em_score = em(predictions = pred_seq[:cnt], references = output_dataset[:cnt], debug = False)
 
                 print(f'rouge score = {rouge_score}')
                 print(f'rouge score = {rouge_score}', file=log_f)
                 print(f'em score = {em_score}')
                 print(f'em score = {em_score}', file=log_f)
+                print(f'average expect cnt = {np.mean(expect_cnt_list)}')
+                print(f'average expect cnt = {np.mean(expect_cnt_list)}', file=log_f)
 
 
 
-        for max_beams in [1,3,4]:
+        for max_beams in [1,2,3,4]:
             for min_beams in [1,2,3]:
                 if min_beams > max_beams:
                     break
@@ -1069,12 +1075,15 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                 print(f'power/token: {power_total/total_token}')
                 print(f'power/token: {power_total/total_token}', file=log_f)
 
+                em_score = None
                 if cnt > large_model_cnt:
                     rouge_score = rouge.compute(predictions = pred_seq[:large_model_cnt], references = output_dataset[:large_model_cnt])
-                    em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt])
+                    if em is not None:
+                        em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt])
                 else:
                     rouge_score = rouge.compute(predictions = pred_seq[:cnt], references = output_dataset[:cnt])
-                    em_score = em(predictions = pred_seq[:cnt], references = output_dataset[:cnt])
+                    if em is not None:
+                        em_score = em(predictions = pred_seq[:cnt], references = output_dataset[:cnt])
 
                 print(f'rouge score = {rouge_score}')
                 print(f'rouge score = {rouge_score}', file=log_f)

@@ -574,6 +574,7 @@ def beam_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.
                 'target_model_time': target_model_cache.forward_time_dict['_model_time'],
                 'target_pre_cache_time': target_model_cache.forward_time_dict['prepare_cache_time'],
                 'target_post_prob_time': target_model_cache.forward_time_dict['norm_prob_time'],
+                'expect_cnt_list': expect_cnt_list,
             }
         return output_prefix, d
     else:
