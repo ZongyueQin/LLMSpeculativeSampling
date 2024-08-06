@@ -113,6 +113,7 @@ def get_seq_att_mask(input_cnt, all_input_idx, all_beam_idx, all_next_token, inp
             next_token = next_token_list[j].item()
             beam_idx = beam_idx_list[j].item()
 
+
             cur_seq_len = len(ret_seq[input_idx])
             pos.append([input_idx, cur_seq_len])
             ret_seq[input_idx].append(next_token)
@@ -164,6 +165,7 @@ def top_k_top_p_filter(logits: torch.Tensor, top_k: int = 0, top_p: float = 0.0)
 
     if top_k is not None and top_k > 0:
         filter = torch.topk(logits, min(top_k, logits.size(-1)))[0]
+
         logits[logits < filter[:, [-1]]] = float('-inf')
     if top_p is not None and top_p > 0.0:
         sorted_logits, sorted_indices = torch.sort(logits, descending=True)
@@ -220,6 +222,12 @@ def sample(probs : torch.Tensor, num_samples: int = 1):
     except:
         print((probs<0).any(), probs.isnan().any(), probs.isinf().any())
         raise RuntimeError('prob error')
+
+    # sometimes torch.multinomial returns element with prob=0, need to take care of it.
+
+    mask = torch.gather(probs, -1, idx_next) < 1e-9
+    if mask.any():
+        idx_next[mask] = torch.argmax(probs).item()
     #if (idx_next.item() == 0) and False:
     #    raise RuntimeError
     return idx_next
@@ -234,7 +242,7 @@ def max_fn(x):
         x_max_sum = torch.sum(x_max, dim=1, keepdim=True)
     else:
         x_max_sum = torch.sum(x_max)
-    return x_max / x_max_sum
+    return x_max / (x_max_sum+1e-6)
 
 def get_accept_prob(p,q): # p is large model, q is small model
   acc_p = p/(q+1e-6)

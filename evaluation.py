@@ -251,8 +251,8 @@ def evaluate(approx_model_name, target_model_name,
                                                        device_map="auto",
                                                        offload_folder="offload",
                                                        trust_remote_code=True)
-    top_k = 10
-    top_p = 0.8
+    top_k = 20
+    top_p = 0.9
     repeats = 2
     
     if dataset_name == 'cnndm':
@@ -394,8 +394,8 @@ SQL: SELECT count(*) FROM head WHERE age  >  56;
             output_dataset = ori_output_dataset[:100]
 
         else:
-            ds = ds[:500]
-            output_dataset = ori_output_dataset[:500]
+            ds = ds[:100]
+            output_dataset = ori_output_dataset[:100]
 #        output_dataset = [ori_output_dataset[12] for k in range(100)]
 
         print(f'input length {l}-{u}, {len(ds)} data in total')
@@ -592,7 +592,7 @@ SQL: SELECT count(*) FROM head WHERE age  >  56;
             em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt])
             print(f'em score = {em_score}')
             print(f'em score = {em_score}', file=log_f)
-        
+         
         
         
         
@@ -676,7 +676,7 @@ SQL: SELECT count(*) FROM head WHERE age  >  56;
                 print(f'power/token: {power_total/total_token}', file=log_f)
         
         # mjsd speculative decoding
-        if True:
+        if False:
             for params in multi_params:
                 if len(params) == 2:
                     gamma, width = params[0], params[1]
@@ -859,12 +859,11 @@ SQL: SELECT count(*) FROM head WHERE age  >  56;
 
    
         for width in [2,3,4,5]:
-          break
-          for extra_sample_cnt in [1,-1]:
+          for extra_sample_cnt in [1,2]:
             for w_thres in [0.5,0.7,0.9]:
 #            for w_thres in [0.7]:
-
-                gamma = 1
+                gamma = 4
+                min_num_beams = 1
 #            for gamma in [1,2]:
 
 #        if True:
@@ -903,7 +902,7 @@ SQL: SELECT count(*) FROM head WHERE age  >  56;
                     output, details = beam_speculative_sampling(input_ids, small_model, large_model, 
                       eos_token_id = tokenizer.eos_token_id,
                       pad_token_id = tokenizer.pad_token_id, max_len = num_tokens, 
-                      gamma = 1, width=width, num_beams = num_beams, min_num_beams = gamma,
+                      gamma = 4, width=width, num_beams = num_beams, min_num_beams = min_num_beams,
                       extra_sample_cnt = extra_sample_cnt,
                       expect_thres = w_thres,
                       top_k = top_k, top_p=top_p, 

@@ -448,6 +448,7 @@ class KVCacheModel():
             acc_rate_thres = 0.4,
             ret_seq_scores = False,
             return_intermediate_results = False,
+            padding_input_cnt = 0,
             optimization = False,
             **kwargs
             ):
@@ -560,6 +561,7 @@ class KVCacheModel():
                                 acc_rate_thres = acc_rate_thres,
                                 ret_seq_scores = ret_seq_scores,
                                 return_intermediate_results = return_intermediate_results,
+                                padding_input_cnt = padding_input_cnt,
                                 optimization = optimization,
                                 **model_kwargs,
                                 )
@@ -585,6 +587,7 @@ class KVCacheModel():
         synced_gpus: bool = False,
         acc_rate_head = None,
         acc_rate_thres = 0.4,
+        padding_input_cnt = 0,
         ret_seq_scores = False,
         return_intermediate_results = False,
         optimization = False,
@@ -643,6 +646,8 @@ class KVCacheModel():
             )
 
         beam_scores = torch.zeros((batch_size, num_beams), dtype=torch.float, device=input_ids.device)
+        if padding_input_cnt > 0:
+            beam_scores[:,-padding_input_cnt:] = float('-inf') 
         beam_scores = beam_scores.view((batch_size * num_beams,))
 
         this_peer_finished = False  # used by synced_gpus only
@@ -660,7 +665,6 @@ class KVCacheModel():
 
 #        print('start iteration')
 #        xxx = input()
-
         while True:
             if synced_gpus:
                 # Under synced_gpus the `forward` call must continue until all gpus complete their sequence.
