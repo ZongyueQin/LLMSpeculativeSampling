@@ -16,6 +16,8 @@ from sampling import BiLD_sampling
 from sampling import random_width_beam_sampling
 from sampling.models.modeling_llama import LlamaForCausalLM
 from sampling.models.modeling_opt import OPTForCausalLM
+#from transformers import LlamaForCausalLM
+#from transformers import OPTForCausalLM
 from sampling.utils import exact_match_references, execution_accuracy_references 
 
 from globals import Decoder
@@ -217,9 +219,10 @@ def evaluate(approx_model_name, target_model_name,
                                                        device_map="auto",
                                                        offload_folder="offload",
                                                        trust_remote_code=True,
-                                                       cache_dir='/local2/ma/cache/huggingface/',
-                                                       _commit_hash='cfe96d938c52db7c6d936f99370c0801b24233c4',
-                                                       local_files_only=True,
+                                                       token = hf_token,
+#                                                       cache_dir='/local2/ma/cache/huggingface/',
+#                                                       _commit_hash='cfe96d938c52db7c6d936f99370c0801b24233c4',
+#                                                       local_files_only=True,
                                                        )
                                                        #token=hf_token)
     elif 'llama' in target_model_name:
@@ -249,7 +252,7 @@ def evaluate(approx_model_name, target_model_name,
                                                        offload_folder="offload",
                                                        trust_remote_code=True)
     top_k = 10
-    top_p = 0.0
+    top_p = 0.8
     repeats = 2
     
     if dataset_name == 'cnndm':
@@ -290,7 +293,7 @@ Now, answer the following question[/INST]
         spider_schema,spider_primary,spider_foreign = creatiing_schema("./spider/spider/tables.json")
 
         examples = """[INST] <<SYS>> You are a SQL expert. You need to write the correct SQL based on the user question and database schemas. Below are some examples <</SYS>>
-Example 1
+Example 
 Schema:
 Table department, columns = [*,Department_ID,Name,Creation,Ranking,Budget_in_Billions,Num_Employees]
 Table head, columns = [*,head_ID,name,born_state,age]
@@ -299,21 +302,12 @@ Foreign_keys = [management.head_ID = head.head_ID,management.department_ID = dep
 Question: "How many heads of the departments are older than 56 ?"
 SQL: SELECT count(*) FROM head WHERE age  >  56; 
 
-Example 2
-Schema:
-Table department, columns = [*,Department_ID,Name,Creation,Ranking,Budget_in_Billions,Num_Employees]
-Table head, columns = [*,head_ID,name,born_state,age]
-Table management, columns = [*,department_ID,head_ID,temporary_acting]
-Foreign_keys = [management.head_ID = head.head_ID,management.department_ID = department.Department_ID]
-Question: "what are the distinct creation years of the departments managed by a secretary born in state 'Alabama'?"
-SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON T1.department_id  =  T2.department_id JOIN head AS T3 ON T2.head_id  =  T3.head_id WHERE T3.born_state  =  'Alabama'; 
-
 """
         input_texts = [examples + 
                        "Schema:\n" + find_fields_MYSQL_like(s["db_id"], spider_schema) + "\n" + 
                        "Question: " + s["question"] + "\n" + 
                        "SQL:" for s in dataset]
-        input_dataset = [tokenizer.encode(text, return_tensors="pt", max_length=1024, truncation=True) for text in input_texts]
+        input_dataset = [tokenizer.encode(text, return_tensors="pt", max_length=512, truncation=True) for text in input_texts]
         output_dataset = [s["db_id"] + "[SQL]" + s["query"] for s in dataset] 
     elif dataset_name == 'ChatGPT':
         dataset = load_dataset('MohamedRashad/ChatGPT-prompts',split='train')
@@ -395,8 +389,13 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
         l = 0
         ds = [pt for pt in input_dataset if (pt.size(-1) < u and pt.size(-1) >= l)]
 #        ds = [ds[12] for k in range(100)]
-        ds = ds[:500]
-        output_dataset = ori_output_dataset[:500]
+        if dataset_name == 'spider':
+            ds = ds[:100]
+            output_dataset = ori_output_dataset[:100]
+
+        else:
+            ds = ds[:500]
+            output_dataset = ori_output_dataset[:500]
 #        output_dataset = [ori_output_dataset[12] for k in range(100)]
 
         print(f'input length {l}-{u}, {len(ds)} data in total')
@@ -593,7 +592,7 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
             em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt])
             print(f'em score = {em_score}')
             print(f'em score = {em_score}', file=log_f)
-
+        
         
         
         
@@ -677,7 +676,7 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                 print(f'power/token: {power_total/total_token}', file=log_f)
         
         # mjsd speculative decoding
-        if False:
+        if True:
             for params in multi_params:
                 if len(params) == 2:
                     gamma, width = params[0], params[1]
@@ -859,9 +858,14 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                 print(f'power/token: {power_total/total_token}', file=log_f)
 
    
-        for width in [3,4,5]:
+        for width in [2,3,4,5]:
+          break
           for extra_sample_cnt in [1,-1]:
-            for gamma in [1,2]:
+            for w_thres in [0.5,0.7,0.9]:
+#            for w_thres in [0.7]:
+
+                gamma = 1
+#            for gamma in [1,2]:
 
 #        if True:
 #            for gamma, width in multi_params:
@@ -875,6 +879,7 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                 other_time = 0
                 target_times = 0
                 total_acc_len = 0
+                compute_expect_time = 0
                 acc_rate = []
                 target_times = 0
                 approx_times = 0
@@ -898,16 +903,18 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                     output, details = beam_speculative_sampling(input_ids, small_model, large_model, 
                       eos_token_id = tokenizer.eos_token_id,
                       pad_token_id = tokenizer.pad_token_id, max_len = num_tokens, 
-                      gamma = 4, width=width, num_beams = num_beams, min_num_beams = gamma,
+                      gamma = 1, width=width, num_beams = num_beams, min_num_beams = gamma,
                       extra_sample_cnt = extra_sample_cnt,
+                      expect_thres = w_thres,
                       top_k = top_k, top_p=top_p, 
                       random_seed = random_seed, details=True)
-#                    val, counts = output[0,input_ids.size(1):].unique(return_counts=True)
+                #    val, counts = output[0,input_ids.size(1):].unique(return_counts=True)
 #                    print(output[0,input_ids.size(1):])
                 #    xxx = input()
-#                    print(val, counts)
-#                    for v,c in zip(val,counts):
-#                        total_counts[float(v)] += c
+                    #print(val, counts)
+                #    for v,c in zip(val,counts):
+                #        total_counts[float(v)] += c
+#                    xxx = input()
                     #print(output)
                     #print(input_ids)
 
@@ -921,6 +928,7 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                     target_times += details['target_call_times']
                     approx_times += details['approx_call_times']
                     expect_cnt_list += details['expect_cnt_list']
+                    compute_expect_time += details['compute_expect_time']
                     score = get_score(output, large_model, input_ids.size(1))
                     if score.isnan().any():
                         print(input_ids)
@@ -947,16 +955,16 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                 outputs = P.stdout.readlines()
                 fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_true_beam_{gamma}_{width}.pkl")
                 power_total = get_total_power(outputs, t1, t2, fname)
- #               print(total_counts)
- #               xxx = input()
+                #print(total_counts)
+                #xxx = input()
 
 
-                print(f'\n true beam speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
+                print(f'\n true beam speculative decoding (min_w {gamma}, max_w {width}, w_thres {w_thres}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}", file=log_f)
                 print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}", file=log_f)       
         
-                print(f'\n true beam speculative decoding (gamma {gamma}, width {width}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
+                print(f'\n true beam speculative decoding (min_w {gamma}, max_w {width}, w_thres {w_thres}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}")
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}")
                 print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")  
@@ -970,11 +978,11 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                 if cnt > large_model_cnt:
                     rouge_score = rouge.compute(predictions = pred_seq[:large_model_cnt], references = output_dataset[:large_model_cnt])
                     if em is not None:
-                        em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt], debug = False)
+                        em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt])
                 else:
                     rouge_score = rouge.compute(predictions = pred_seq[:cnt], references = output_dataset[:cnt])
                     if em is not None:
-                        em_score = em(predictions = pred_seq[:cnt], references = output_dataset[:cnt], debug = False)
+                        em_score = em(predictions = pred_seq[:cnt], references = output_dataset[:cnt])
 
                 print(f'rouge score = {rouge_score}')
                 print(f'rouge score = {rouge_score}', file=log_f)
@@ -982,14 +990,15 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                 print(f'em score = {em_score}', file=log_f)
                 print(f'average expect cnt = {np.mean(expect_cnt_list)}')
                 print(f'average expect cnt = {np.mean(expect_cnt_list)}', file=log_f)
+                print(f'compute expect time {compute_expect_time/1e9}')
+                print(f'compute expect time {compute_expect_time/1e9}', file=log_f)
 
 
 
         for max_beams in [1,2,3,4]:
-            for min_beams in [1,2,3]:
+            break
+            for min_beams in [1,2,3,4]:
                 if min_beams > max_beams:
-                    break
-                if min_beams > 1:
                     break
                 total_time = 0
                 total_token = 0
@@ -1008,7 +1017,8 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
                 t1 = time.time()
                 p_list_list = []
                 total_counts = {1.:0, 12.:0}
-                for input_ids in tqdm(ds):
+                try:
+                  for input_ids in tqdm(ds):
                     cnt += 1
                     #if cnt % 16 == 0:
                     #    time.sleep(0.025)
@@ -1055,41 +1065,44 @@ SQL: SELECT DISTINCT T1.creation FROM department AS T1 JOIN management AS T2 ON 
 #                print(total_counts)
 #                xxx = input()
 
-                t2 = time.time()
+                  t2 = time.time()
    #             torch.save(p_list_list, 'rb_p_list.pth')
-                P.kill()
-                P.wait()
-                outputs = P.stdout.readlines()
-                fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_rwbd_{max_beams}_{min_beams}.pkl")
-                power_total = get_total_power(outputs, t1, t2, fname)
-                print(t1, t2)
+                  P.kill()
+                  P.wait()
+                  outputs = P.stdout.readlines()
+                  fname = os.path.join(prefix, f"{approx_model_name}_{target_model_name}_{dataset_name}_rwbd_{max_beams}_{min_beams}.pkl")
+                  power_total = get_total_power(outputs, t1, t2, fname)
+                  print(t1, t2)
 
-                print(f'\n rwbd decoding {(max_beams, min_beams)} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
-                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}", file=log_f)       
+                  print(f'\n rwbd decoding {(max_beams, min_beams)} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
+                  print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}", file=log_f)       
         
-                print(f'\n rwbd decoding {(max_beams, min_beams)} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
-                print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")  
+                  print(f'\n rwbd decoding {(max_beams, min_beams)} total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
+                  print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")  
 
-                print(f'total power consumption: {power_total}')
-                print(f'total power consumption: {power_total}', file=log_f)
-                print(f'power/token: {power_total/total_token}')
-                print(f'power/token: {power_total/total_token}', file=log_f)
+                  print(f'total power consumption: {power_total}')
+                  print(f'total power consumption: {power_total}', file=log_f)
+                  print(f'power/token: {power_total/total_token}')
+                  print(f'power/token: {power_total/total_token}', file=log_f)
 
-                em_score = None
-                if cnt > large_model_cnt:
+                  em_score = None
+                  if cnt > large_model_cnt:
                     rouge_score = rouge.compute(predictions = pred_seq[:large_model_cnt], references = output_dataset[:large_model_cnt])
                     if em is not None:
                         em_score = em(predictions = pred_seq, references = output_dataset[:large_model_cnt])
-                else:
+                  else:
                     rouge_score = rouge.compute(predictions = pred_seq[:cnt], references = output_dataset[:cnt])
                     if em is not None:
                         em_score = em(predictions = pred_seq[:cnt], references = output_dataset[:cnt])
 
-                print(f'rouge score = {rouge_score}')
-                print(f'rouge score = {rouge_score}', file=log_f)
+                  print(f'rouge score = {rouge_score}')
+                  print(f'rouge score = {rouge_score}', file=log_f)
 
-                print(f'em score = {em_score}')
-                print(f'em score = {em_score}', file=log_f)
+                  print(f'em score = {em_score}')
+                  print(f'em score = {em_score}', file=log_f)
+                except Exception as e:
+                    print(e)
+                    continue
    #             print(pred_seq)
 
 

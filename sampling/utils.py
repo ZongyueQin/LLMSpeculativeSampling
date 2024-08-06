@@ -64,9 +64,13 @@ def match(result1, result2):
 
 def execution_accuracy(db, pred, sql):
     conn = sqlite3.connect(f"./spider/spider/database/{db}/{db}.sqlite")
-    conn.text_factory = str
+    conn.text_factory = bytes
     cur = conn.cursor()
-    gt_result = cur.execute(sql).fetchall()
+    try:
+        gt_result = cur.execute(sql).fetchall()
+    except:
+        return -1
+
     try:
         result = cur.execute(pred).fetchall()
     except:
@@ -77,11 +81,16 @@ def execution_accuracy(db, pred, sql):
 
 def execution_accuracy_references(predictions, references):
     em = 0
+    exception = 0
     for pred, refer in zip(predictions, references):
         db = refer.split("[SQL]")[0]
         sql = refer.split("[SQL]")[1]
-        em += execution_accuracy(db, pred, sql)
-    return {"execution accuracy": 100.0 * em / len(predictions)}
+        acc = execution_accuracy(db, pred, sql)
+        if acc >= 0:
+            em += acc
+        else:
+            exception += 1
+    return {"execution accuracy": 100.0 * em / (len(predictions)-exception), "exception": exception}
 
 def get_seq_att_mask(input_cnt, all_input_idx, all_beam_idx, all_next_token, input_len, pad_token_id, device='cpu'):
     """
@@ -204,8 +213,8 @@ def sample(probs : torch.Tensor, num_samples: int = 1):
         replacement = True
     else:
         replacement = False
-    """ for debugging """
-    replacement = True
+#    """ for debugging """
+#    replacement = True
     try:
         idx_next = torch.multinomial(probs, num_samples=num_samples, replacement = replacement)
     except:
@@ -226,3 +235,109 @@ def max_fn(x):
     else:
         x_max_sum = torch.sum(x_max)
     return x_max / x_max_sum
+
+def get_accept_prob(p,q): # p is large model, q is small model
+  acc_p = p/(q+1e-6)
+  acc_p = torch.where(acc_p>1, torch.ones_like(acc_p), acc_p)
+  return torch.sum(acc_p * q)
+
+def update_large_prob(p,q): # p is large model, q is small model
+  new_p = p-q
+  new_p = torch.where(new_p<0, torch.zeros_like(new_p), new_p)
+  return new_p/(new_p.sum()+1e-6)
+
+def get_first_accept_prob(p_list,q,m,idx):
+  # given large model p, small model q, and m draft tokens
+  # compute the probability of the first accepted token is token [idx]
+  # idx value range is 1 to m
+  assert idx <= m
+  prob = 1.
+#  cur_p = p.clone()
+  for i in range(idx-1):
+    cur_p = p_list[i]
+    if cur_p.isnan().any():
+        print('get_first_accept_prob, cur_p is nan')
+    alpha_i = get_accept_prob(cur_p, q)
+    if alpha_i.isnan():
+        print('alpha_i is nan')
+    prob *= (1-alpha_i)
+#    cur_p = update_large_prob(cur_p, q)
+  cur_p = p_list[idx-1]
+  if cur_p.isnan().any():
+      print('get_first_accept_prob, cur_p is nan')
+
+  alpha_i = get_accept_prob(cur_p, q)
+  if alpha_i.isnan():
+      print('alpha_i is nan')
+  prob *= alpha_i
+  return prob
+
+def get_all_reject_prob(p_list,q,m):
+  prob = 1.
+#  cur_p = p.clone()
+  for i in range(m):
+    cur_p = p_list[i]
+    alpha_i = get_accept_prob(cur_p, q)
+    prob *= (1-alpha_i)
+ #   cur_p = update_large_prob(cur_p, q)
+  return prob
+
+def get_prob_for_accept_k_tokens(p_list,q,m,k,history):
+  assert m >= 0
+
+  if m < k:
+    return 0
+  if m == 0 and k == 0:
+    return 1
+  if history[m-1][k-1] >= 0:
+    return history[m-1][k-1]
+  if k == 0:
+    return get_all_reject_prob(p_list,q,m)
+  prob = 0
+  for i in range(1,m+1):
+    A = get_first_accept_prob(p_list,q,m,i)
+    B = get_prob_for_accept_k_tokens(p_list,q,m-i,k-1,history)
+    prob += A * B
+    if prob < 0 or prob.isnan():
+        print(prob)
+        print(A)
+        print(B)
+        xxx = input('error')
+  history[m-1][k-1] = prob
+  return prob
+
+def get_num_acc_prob(p,q,m):
+  p_list = []
+  cur_p = p.clone()
+  for i in range(m):
+    p_list.append(cur_p)
+    cur_p = update_large_prob(cur_p, q)
+    if cur_p.isnan().any():
+        print('update large prob nan')
+        print(cur_p)
+        xxx = input()
+  
+  total_prob = 0.
+  expect = 0.
+  history = -1 * torch.ones(m,m).float()
+  prob = torch.zeros(m+1).float()
+  for k in range(m+1):
+    p_mk = get_prob_for_accept_k_tokens(p_list,q,m,k,history)
+    prob[k-1] = p_mk
+#    print(f'k={k}, p_mk={p_mk}')
+    total_prob += p_mk
+    expect += p_mk * k
+  return prob, expect
+
+def get_expect_cnt_by_thres(p_width, expect_thres):
+    n = p_width.numel()
+    cum_p = 0
+    while cum_p < expect_thres and n > 0:
+        n -= 1
+        cum_p += p_width[n]
+#    print(p_width)
+#    print(n)
+#    print(cum_p)
+#    xxx = input()
+    return int(n)
+
