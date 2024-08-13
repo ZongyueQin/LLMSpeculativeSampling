@@ -256,7 +256,7 @@ def beam_speculative_sampling_v2(prefix : torch.Tensor, approx_model : torch.nn.
                     if expect_thres < 0:
                         expect_cnt = e_width.floor().item()
                     else:
-                        expect_cnt = get_expect_cnt_by_thres(p_width, expect_thres)
+                        expect_cnt = get_expect_cnt_by_thres(p_width, expect_thres, num_beams)
                     expect_cnt = max(expect_cnt, min_num_beams)
 
                     #expect_cnt = 2

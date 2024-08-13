@@ -1,5 +1,4 @@
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,3,6'
 
 import pandas as pd
 import torch
@@ -253,7 +252,7 @@ def evaluate(approx_model_name, target_model_name,
                                                        trust_remote_code=True)
     top_k = 10
     top_p = 0.8
-    repeats = 2
+    repeats = 1
     
     if dataset_name == 'cnndm':
         dataset = load_dataset('cnn_dailymail', '3.0.0', split='test')
@@ -394,8 +393,8 @@ SQL: SELECT count(*) FROM head WHERE age  >  56;
             output_dataset = ori_output_dataset[:100]
 
         else:
-            ds = ds[:500]
-            output_dataset = ori_output_dataset[:500]
+            ds = ds[:100]
+            output_dataset = ori_output_dataset[:100]
 #        output_dataset = [ori_output_dataset[12] for k in range(100)]
 
         print(f'input length {l}-{u}, {len(ds)} data in total')
@@ -676,7 +675,7 @@ SQL: SELECT count(*) FROM head WHERE age  >  56;
                 print(f'power/token: {power_total/total_token}', file=log_f)
         
         # mjsd speculative decoding
-        if True:
+        if False:
             for params in multi_params:
                 if len(params) == 2:
                     gamma, width = params[0], params[1]
@@ -859,12 +858,11 @@ SQL: SELECT count(*) FROM head WHERE age  >  56;
 
    
         for width in [2,3,4,5]:
-          break
           for extra_sample_cnt in [1,-1]:
-            for w_thres in [0.5,0.7,0.9]:
+            for w_thres in [0.7,0.9]:
+              for gamma in [1,2]:
 #            for w_thres in [0.7]:
 
-                gamma = 1
 #            for gamma in [1,2]:
 
 #        if True:
@@ -902,12 +900,18 @@ SQL: SELECT count(*) FROM head WHERE age  >  56;
 
                     output, details = beam_speculative_sampling(input_ids, small_model, large_model, 
                       eos_token_id = tokenizer.eos_token_id,
-                      pad_token_id = tokenizer.pad_token_id, max_len = num_tokens, 
-                      gamma = 1, width=width, num_beams = num_beams, min_num_beams = gamma,
+                      pad_token_id = tokenizer.pad_token_id, 
+                      max_len = num_tokens, 
+                      gamma = gamma, 
+                      width=width, 
+                      num_beams = num_beams, 
+                      min_num_beams = 1,
                       extra_sample_cnt = extra_sample_cnt,
                       expect_thres = w_thres,
-                      top_k = top_k, top_p=top_p, 
-                      random_seed = random_seed, details=True)
+                      top_k = top_k, 
+                      top_p=top_p, 
+                      random_seed = random_seed, 
+                      details=True)
                 #    val, counts = output[0,input_ids.size(1):].unique(return_counts=True)
 #                    print(output[0,input_ids.size(1):])
                 #    xxx = input()
@@ -959,12 +963,12 @@ SQL: SELECT count(*) FROM head WHERE age  >  56;
                 #xxx = input()
 
 
-                print(f'\n true beam speculative decoding (min_w {gamma}, max_w {width}, w_thres {w_thres}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
+                print(f'\n true beam speculative decoding (gamma {gamma}, max_w {width}, w_thres {w_thres}, extra {extra_sample_cnt}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token', file=log_f)
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}", file=log_f)
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}", file=log_f)
                 print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}", file=log_f)       
         
-                print(f'\n true beam speculative decoding (min_w {gamma}, max_w {width}, w_thres {w_thres}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
+                print(f'\n true beam speculative decoding (gamma {gamma}, max_w {width}, w_thres {w_thres}, extra {extra_sample_cnt}) total time {total_time/1e9} s, total tokens {total_token}, average time {total_time/1e9/total_token} s/token')
                 print(f"approx time {approx_time/1e9}, target time {target_time/1e9}, other time {other_time/1e9}")
                 print(f"average accepted len {total_acc_len/target_times}, target call times {target_times}, acc rate {np.mean(acc_rate)}, approx call times {approx_times}")
                 print(f"prob score = {np.mean(scores)}, prob score cut = {np.mean(scores[:large_model_cnt])}")  
@@ -995,11 +999,12 @@ SQL: SELECT count(*) FROM head WHERE age  >  56;
 
 
 
-        for max_beams in [1,2,3,4]:
-            break
+        for max_beams in [2,3,4]:
             for min_beams in [1,2,3,4]:
                 if min_beams > max_beams:
                     break
+                if min_beams < max_beams - 1:
+                    continue
                 total_time = 0
                 total_token = 0
                 approx_time = 0

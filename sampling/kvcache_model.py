@@ -330,6 +330,7 @@ class KVCacheModel():
         width = input_idx.numel()
         past_key_values_trimmed = []
         
+        """
         for kv in self._past_key_values:
             k, v = kv
             k = k[input_idx.to(k.device), :, :, :]
@@ -354,7 +355,23 @@ class KVCacheModel():
         #print(self._past_key_values[0][0].size())
         #print(self._prob_history.size())
         #xxx = input()
+        """
+        device = self._past_key_values[0][0].device
+        mask = mask.to(device)
+        input_idx = input_idx.to(device)
 
+        expand_mask = mask.unsqueeze(1).expand(-1, num_head, -1)
+        for kv in self._past_key_values:
+            k, v = kv
+            k = k[input_idx][expand_mask].view(width, num_head, -1, emb_dim)
+            v = v[input_idx][expand_mask].view(width, num_head, -1, emb_dim)
+            kv_trimmed = (k, v)
+            past_key_values_trimmed.append(kv_trimmed)
+
+        self._past_key_values = past_key_values_trimmed
+        if self._prob_history is not None:
+            vocab_size = self._prob_history.size(-1)
+            self._prob_history = self._prob_history[input_idx][mask].view(width, -1, vocab_size)
 
     @torch.no_grad()
     def rollback(self, end_pos, choice=None):

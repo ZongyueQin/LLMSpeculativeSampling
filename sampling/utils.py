@@ -306,6 +306,7 @@ def get_prob_for_accept_k_tokens(p_list,q,m,k,history):
   history[m-1][k-1] = prob
   return prob
 
+"""
 def get_num_acc_prob(p,q,m):
   p_list = []
   cur_p = p.clone()
@@ -340,4 +341,39 @@ def get_expect_cnt_by_thres(p_width, expect_thres):
 #    print(cum_p)
 #    xxx = input()
     return int(n)
+"""
+def get_expect_cnt_by_thres(p_width, expect_thres, n):
+    cum_p = p_width[n]
+    while cum_p < expect_thres and n > 0:
+        #print(n, cum_p)
+        n -= 1
+        cum_p += p_width[n]
+    return int(n)
+
+def get_num_acc_prob(p,q,m):
+    beta_list = torch.zeros(m, dtype=p.dtype).to(p.device)
+    P = torch.zeros(m+1, m+1, dtype=p.dtype).to(p.device)
+    P[0,0] = 1
+    acc_rej_prob = 1.
+
+    cur_p = p.clone()
+    for i in range(1,m+1):
+        acc_p = cur_p/(q+1e-6)
+        acc_p[acc_p>1] = 1.
+        alpha = torch.sum(acc_p * q)
+
+        beta_list[i-1] = acc_rej_prob * alpha
+        P[i,0] = acc_rej_prob * (1-alpha)
+        acc_rej_prob *= (1-alpha)
+
+        new_line = torch.squeeze(beta_list[:i].flip(dims=[0]).view(1,-1) @ P[:i])
+        P[i,1:] = new_line[:-1]
+
+        cur_p = update_large_prob(cur_p, q)
+        cur_p = cur_p-q
+        cur_p[cur_p < 0] = 0
+        cur_p = cur_p / (cur_p.sum() + 1e-6)
+
+    return P[m], torch.sum(torch.arange(m+1).float().to(P.device) * P[m])
+
 
